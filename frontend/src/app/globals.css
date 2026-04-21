@@ -457,3 +457,142 @@
   background: oklch(0.702 0.183 293 / 0.3);
   color: oklch(0.938 0.02 293);
 }
+
+/* ═══════════════════════════════════════════
+   3D Card Flip (Memory Training)
+   ═══════════════════════════════════════════ */
+
+.flip-card {
+  perspective: 1200px;
+}
+
+.flip-card-inner {
+  position: relative;
+  transition: transform 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+  transform-style: preserve-3d;
+}
+
+.flip-card-inner.flipped {
+  transform: rotateY(180deg);
+}
+
+.flip-card-front,
+.flip-card-back {
+  backface-visibility: hidden;
+  -webkit-backface-visibility: hidden;
+}
+
+.flip-card-back {
+  position: absolute;
+  inset: 0;
+  transform: rotateY(180deg);
+}
+
+/* ═══════════════════════════════════════════
+   Review Feedback Animations
+   ═══════════════════════════════════════════ */
+
+@keyframes feedback-correct {
+  0% { box-shadow: 0 0 0 0 oklch(0.723 0.219 149 / 0.5); }
+  50% { box-shadow: 0 0 0 12px oklch(0.723 0.219 149 / 0); }
+  100% { box-shadow: 0 0 0 0 oklch(0.723 0.219 149 / 0); }
+}
+
+@keyframes feedback-wrong {
+  0%, 100% { transform: translateX(0); }
+  10%, 50%, 90% { transform: translateX(-4px); }
+  30%, 70% { transform: translateX(4px); }
+}
+
+@keyframes feedback-fuzzy {
+  0% { box-shadow: 0 0 0 0 oklch(0.795 0.184 86 / 0.5); }
+  50% { box-shadow: 0 0 0 10px oklch(0.795 0.184 86 / 0); }
+  100% { box-shadow: 0 0 0 0 oklch(0.795 0.184 86 / 0); }
+}
+
+.feedback-correct {
+  animation: feedback-correct 0.6s ease-out;
+  border-color: oklch(0.723 0.219 149) !important;
+}
+
+.feedback-wrong {
+  animation: feedback-wrong 0.4s ease-out;
+  border-color: oklch(0.637 0.237 25) !important;
+}
+
+.feedback-fuzzy {
+  animation: feedback-fuzzy 0.5s ease-out;
+  border-color: oklch(0.795 0.184 86) !important;
+}
+
+/* ═══════════════════════════════════════════
+   Streak Milestone Animation
+   ═══════════════════════════════════════════ */
+
+@keyframes streak-pop {
+  0% { transform: scale(0.5); opacity: 0; }
+  50% { transform: scale(1.15); }
+  100% { transform: scale(1); opacity: 1; }
+}
+
+@keyframes streak-particles {
+  0% { transform: translateY(0) scale(1); opacity: 1; }
+  100% { transform: translateY(-60px) scale(0); opacity: 0; }
+}
+
+.streak-pop {
+  animation: streak-pop 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.streak-particle {
+  position: absolute;
+  animation: streak-particles 0.8s ease-out forwards;
+  pointer-events: none;
+}
+
+/* ═══════════════════════════════════════════
+   Score Delta Animation
+   ═══════════════════════════════════════════ */
+
+@keyframes score-float-up {
+  0% { transform: translateY(0); opacity: 1; }
+  100% { transform: translateY(-30px); opacity: 0; }
+}
+
+.score-delta {
+  animation: score-float-up 0.8s ease-out forwards;
+  pointer-events: none;
+}
+
+/* ═══════════════════════════════════════════
+   Card Reveal Answer Transition
+   ═══════════════════════════════════════════ */
+
+@keyframes answer-reveal {
+  0% { opacity: 0; transform: translateY(8px); }
+  100% { opacity: 1; transform: translateY(0); }
+}
+
+.answer-reveal {
+  animation: answer-reveal 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* ═══════════════════════════════════════════
+   Confetti / Celebration
+   ═══════════════════════════════════════════ */
+
+@keyframes confetti-fall {
+  0% { transform: translateY(-10px) rotate(0deg); opacity: 1; }
+  100% { transform: translateY(100vh) rotate(720deg); opacity: 0; }
+}
+
+.confetti-piece {
+  position: fixed;
+  top: -10px;
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  animation: confetti-fall linear forwards;
+  pointer-events: none;
+  z-index: 9999;
+}

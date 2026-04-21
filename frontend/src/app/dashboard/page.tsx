@@ -295,11 +295,14 @@ export default function DashboardPage() {
                   <CardTitle className="text-base font-semibold">{t("dashboard.weeklyOverview")}</CardTitle>
                 </CardHeader>
                 <CardContent>
-                  <div className="flex h-28 items-end gap-2">
+                  <div className="flex h-32 items-end gap-2">
                     {recentDaily.map((item) => (
-                      <div key={item.date} className="flex flex-1 flex-col items-center gap-1">
+                      <div key={item.date} className="flex flex-1 flex-col items-center gap-1 group">
+                        <span className="text-[10px] font-medium text-primary opacity-0 group-hover:opacity-100 transition-opacity">
+                          {item.count}
+                        </span>
                         <div
-                          className="w-full rounded-t-lg bg-gradient-to-t from-primary to-violet-300 transition-all duration-500"
+                          className="w-full rounded-t-lg bg-gradient-to-t from-primary to-violet-300 transition-all duration-500 group-hover:from-primary group-hover:to-violet-400 group-hover:opacity-90 cursor-default"
                           style={{ height: `${Math.max(8, (item.count / maxDaily) * 96)}px` }}
                           title={`${item.date}: ${item.count}`}
                         />

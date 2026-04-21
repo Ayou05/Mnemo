@@ -13,6 +13,7 @@ import { Badge } from "@/components/ui/badge";
 import { EmptyState } from "@/components/ui/empty-state";
 import { ErrorState } from "@/components/ui/error-state";
 import { ListSkeleton } from "@/components/ui/skeleton";
+import { Confetti } from "@/components/ui/celebrations";
 import {
   Dialog,
   DialogContent,
@@ -114,8 +115,34 @@ interface GroupCardProgress {
   passed: boolean;
 }
 
+interface GamificationState {
+  globalStreak: number;
+  bestStreak: number;
+  totalScore: number;
+  sessionScore: number;
+  lastScoreDelta: number;
+  streakMilestone: string | null; // "x3" | "x5" | "x10" | null — triggers animation
+}
+
 const GROUP_SIZE_OPTIONS = [5, 10, 15, 20];
 const PASS_STREAK_TARGET = 3;
+
+function getComboMultiplier(streak: number): number {
+  if (streak >= 20) return 2.5;
+  if (streak >= 10) return 2.0;
+  if (streak >= 5) return 1.5;
+  return 1.0;
+}
+
+function getStreakMilestone(streak: number): string | null {
+  if (streak === 3) return "x3";
+  if (streak === 5) return "x5";
+  if (streak === 10) return "x10";
+  if (streak === 15) return "x15";
+  if (streak === 20) return "x20";
+  if (streak > 0 && streak % 10 === 0) return `x${streak}`;
+  return null;
+}
 
 function getReviewCountdown(card: MemoryCard, nowMs: number) {
   if (!card.next_review || card.review_count === 0) {
@@ -241,6 +268,18 @@ export default function MemoryPage() {
   } | null>(null);
   /** 反馈出现后必须手动点「继续」再进下一题（无定时器自动切题，避免秒跳） */
   const [awaitingManualAdvance, setAwaitingManualAdvance] = useState(false);
+
+  // Gamification state
+  const [game, setGame] = useState<GamificationState>({
+    globalStreak: 0,
+    bestStreak: 0,
+    totalScore: 0,
+    sessionScore: 0,
+    lastScoreDelta: 0,
+    streakMilestone: null,
+  });
+  const streakMilestoneTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [sessionComplete, setSessionComplete] = useState(false);
 
   // Card detail panel
   const [detailCard, setDetailCard] = useState<any>(null);
@@ -535,6 +574,8 @@ export default function MemoryPage() {
         setReviewStepLocked(false);
         setLastCASRResult(null);
         setReviewSessionStats({ forgot: 0, fuzzy: 0, remembered: 0 });
+        setGame({ globalStreak: 0, bestStreak: 0, totalScore: 0, sessionScore: 0, lastScoreDelta: 0, streakMilestone: null });
+        setSessionComplete(false);
         setReviewMode(mode);
         setReviewSource("general");
         setGroupProgress(initialProgress);
@@ -634,6 +675,8 @@ export default function MemoryPage() {
       setReviewStepLocked(false);
       setLastCASRResult(null);
       setReviewSessionStats({ forgot: 0, fuzzy: 0, remembered: 0 });
+      setGame({ globalStreak: 0, bestStreak: 0, totalScore: 0, sessionScore: 0, lastScoreDelta: 0, streakMilestone: null });
+      setSessionComplete(false);
       setReviewMode(group[0]?.mode || "write_en_to_zh");
       setReviewFlow(flow);
       setReviewSource("general");
@@ -669,6 +712,8 @@ export default function MemoryPage() {
       setReviewStepLocked(false);
       setLastCASRResult(null);
       setReviewSessionStats({ forgot: 0, fuzzy: 0, remembered: 0 });
+      setGame({ globalStreak: 0, bestStreak: 0, totalScore: 0, sessionScore: 0, lastScoreDelta: 0, streakMilestone: null });
+      setSessionComplete(false);
       setReviewMode("write_en_to_zh");
       setReviewSource("wrongbook");
       setGroupProgress(initialProgress);
@@ -769,6 +814,38 @@ export default function MemoryPage() {
     setLastCASRResult(res);
     setGroupProgress(updatedProgress);
     setReviewSessionStats(prev => ({ ...prev, [result]: prev[result] + 1 }));
+
+    // ── Gamification: update streak & score ──
+    setGame(prev => {
+      const isCorrect = result === "remembered" || result === "fuzzy";
+      const newStreak = isCorrect ? prev.globalStreak + 1 : 0;
+      const newBest = Math.max(prev.bestStreak, newStreak);
+      const multiplier = getComboMultiplier(newStreak);
+      const basePoints = result === "remembered" ? 10 : result === "fuzzy" ? 5 : 0;
+      const isFirstCorrect = currentProgress.attempts === 0 && isCorrect;
+      const bonusPoints = isFirstCorrect ? 5 : 0;
+      const delta = Math.round((basePoints + bonusPoints) * multiplier);
+      const milestone = getStreakMilestone(newStreak);
+
+      if (milestone && streakMilestoneTimerRef.current) {
+        clearTimeout(streakMilestoneTimerRef.current);
+      }
+      if (milestone) {
+        streakMilestoneTimerRef.current = setTimeout(() => {
+          setGame(g => ({ ...g, streakMilestone: null }));
+        }, 1500);
+      }
+
+      return {
+        globalStreak: newStreak,
+        bestStreak: newBest,
+        totalScore: prev.totalScore + delta,
+        sessionScore: prev.sessionScore + delta,
+        lastScoreDelta: delta,
+        streakMilestone: milestone,
+      };
+    });
+
     if (nextProgress.passed) {
       setGroupPassed(prev => prev + 1);
     }
@@ -783,8 +860,7 @@ export default function MemoryPage() {
           toast.error("清除错题记录失败");
         }
       }
-      toast.success(t("memory.reviewComplete"));
-      setReviewing(false);
+      setSessionComplete(true);
       setReviewStepLocked(false);
       fetchCards();
       fetchStats();
@@ -885,6 +961,53 @@ export default function MemoryPage() {
     const timer = setTimeout(() => { fetchCards(); }, 300);
     return () => clearTimeout(timer);
   }, [search]);
+
+  // ── Timed mode: auto-flip after 5 seconds with countdown ──
+  const [timedCountdown, setTimedCountdown] = useState(0);
+
+  useEffect(() => {
+    if (!reviewing || sessionComplete || reviewQueue.length === 0) {
+      setTimedCountdown(0);
+      return;
+    }
+    const card = reviewQueue[reviewIndex];
+    if (!card) return;
+    const mode = card.evolution_mode || "standard";
+    if (mode !== "timed" || showAnswer || reviewStepLocked || lastCASRResult) {
+      setTimedCountdown(0);
+      return;
+    }
+
+    setTimedCountdown(5);
+    const timer = setTimeout(() => {
+      handleFlip();
+      setTimedCountdown(0);
+    }, 5000);
+
+    const countdownInterval = setInterval(() => {
+      setTimedCountdown((prev) => Math.max(0, prev - 1));
+    }, 1000);
+
+    return () => {
+      clearTimeout(timer);
+      clearInterval(countdownInterval);
+    };
+  }, [reviewing, sessionComplete, reviewIndex, reviewQueue, showAnswer, reviewStepLocked, lastCASRResult]);
+
+  // ── Flash mode: show answer for 1.5s then hide ──
+  useEffect(() => {
+    if (!reviewing || sessionComplete || reviewQueue.length === 0) return;
+    const card = reviewQueue[reviewIndex];
+    if (!card) return;
+    const mode = card.evolution_mode || "standard";
+    if (mode !== "flash" || !showAnswer || reviewStepLocked || lastCASRResult) return;
+
+    const delay = 1500;
+    const timer = setTimeout(() => {
+      setShowAnswer(false);
+    }, delay);
+    return () => clearTimeout(timer);
+  }, [reviewing, sessionComplete, reviewIndex, reviewQueue, showAnswer, reviewStepLocked, lastCASRResult]);
 
   // ── Render ──
 
@@ -1294,8 +1417,117 @@ export default function MemoryPage() {
           </Card>
         )}
 
+        {/* ═══ Session Complete Summary ═══ */}
+        {activeTab === "review" && sessionComplete && reviewing && (
+          <>
+          <Confetti active={true} />
+          <div className="max-w-lg mx-auto space-y-4 animate-in fade-in slide-in-from-bottom-4 duration-500">
+            <Card className="border-primary/30 bg-gradient-to-br from-primary/5 to-violet-500/5">
+              <CardHeader className="text-center pb-2">
+                <CardTitle className="text-xl">🎉 训练完成!</CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                {/* Score highlight */}
+                <div className="text-center">
+                  <div className="text-4xl font-black text-primary">⭐ {game.sessionScore}</div>
+                  <p className="text-sm text-muted-foreground mt-1">本次积分</p>
+                </div>
+
+                {/* Stats grid */}
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="rounded-lg border bg-background/50 p-3 text-center">
+                    <div className="text-2xl font-bold text-emerald-500">
+                      {reviewSessionStats.remembered}
+                    </div>
+                    <p className="text-xs text-muted-foreground">正确</p>
+                  </div>
+                  <div className="rounded-lg border bg-background/50 p-3 text-center">
+                    <div className="text-2xl font-bold text-amber-500">
+                      {reviewSessionStats.fuzzy}
+                    </div>
+                    <p className="text-xs text-muted-foreground">模糊</p>
+                  </div>
+                  <div className="rounded-lg border bg-background/50 p-3 text-center">
+                    <div className="text-2xl font-bold text-red-500">
+                      {reviewSessionStats.forgot}
+                    </div>
+                    <p className="text-xs text-muted-foreground">忘记</p>
+                  </div>
+                  <div className="rounded-lg border bg-background/50 p-3 text-center">
+                    <div className="text-2xl font-bold text-orange-500">
+                      🔥 {game.bestStreak}
+                    </div>
+                    <p className="text-xs text-muted-foreground">最高连击</p>
+                  </div>
+                </div>
+
+                {/* Accuracy bar */}
+                {(() => {
+                  const total = reviewSessionStats.remembered + reviewSessionStats.fuzzy + reviewSessionStats.forgot;
+                  const accuracy = total > 0 ? Math.round(((reviewSessionStats.remembered + reviewSessionStats.fuzzy) / total) * 100) : 0;
+                  return (
+                    <div className="space-y-1">
+                      <div className="flex justify-between text-sm">
+                        <span className="text-muted-foreground">正确率</span>
+                        <span className="font-semibold">{accuracy}%</span>
+                      </div>
+                      <div className="w-full bg-muted rounded-full h-2.5">
+                        <div
+                          className={`h-2.5 rounded-full transition-all duration-700 ${
+                            accuracy >= 90 ? "bg-gradient-to-r from-emerald-400 to-green-500" :
+                            accuracy >= 70 ? "bg-gradient-to-r from-amber-400 to-yellow-500" :
+                            "bg-gradient-to-r from-red-400 to-orange-500"
+                          }`}
+                          style={{ width: `${accuracy}%` }}
+                        />
+                      </div>
+                    </div>
+                  );
+                })()}
+
+                {/* Mastery progress */}
+                <div className="rounded-lg border bg-background/50 p-3">
+                  <div className="flex justify-between text-sm mb-1">
+                    <span className="text-muted-foreground">本组掌握</span>
+                    <span className="font-semibold">{groupPassed} / {groupTotal}</span>
+                  </div>
+                  <div className="w-full bg-muted rounded-full h-2">
+                    <div className="bg-gradient-to-r from-primary to-violet-400 h-2 rounded-full transition-all duration-700"
+                      style={{ width: `${groupTotal > 0 ? (groupPassed / groupTotal) * 100 : 0}%` }}
+                    />
+                  </div>
+                </div>
+
+                {/* Actions */}
+                <div className="flex gap-3 pt-2">
+                  <Button
+                    className="flex-1"
+                    onClick={() => {
+                      setSessionComplete(false);
+                      setReviewing(false);
+                    }}
+                  >
+                    返回
+                  </Button>
+                  <Button
+                    variant="outline"
+                    className="flex-1"
+                    onClick={() => {
+                      setSessionComplete(false);
+                      startSmartSession("review");
+                    }}
+                  >
+                    再来一轮
+                  </Button>
+                </div>
+              </CardContent>
+            </Card>
+          </div>
+          </>
+        )}
+
         {/* ═══ Active CASR Review Session ═══ */}
-        {activeTab === "review" && reviewing && reviewQueue.length > 0 && (() => {
+        {activeTab === "review" && reviewing && !sessionComplete && reviewQueue.length > 0 && (() => {
           const card = reviewQueue[reviewIndex];
           const mode = card.evolution_mode || "standard";
           const currentMode = card.mode || reviewMode;
@@ -1334,8 +1566,53 @@ export default function MemoryPage() {
               <div className="bg-indigo-500 h-1.5 rounded-full transition-all" style={{ width: `${groupTotal > 0 ? (groupPassed / groupTotal) * 100 : 0}%` }} />
             </div>
 
+            {/* ── Gamification HUD ── */}
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                {game.globalStreak > 0 && (
+                  <span className={`inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs font-bold transition-all ${
+                    game.globalStreak >= 10 ? "bg-orange-500/20 text-orange-400" :
+                    game.globalStreak >= 5 ? "bg-amber-500/20 text-amber-400" :
+                    "bg-yellow-500/15 text-yellow-500"
+                  }`}>
+                    🔥 {game.globalStreak}
+                  </span>
+                )}
+                {game.lastScoreDelta > 0 && (
+                  <span className="text-xs font-semibold text-emerald-400 animate-in fade-in slide-in-from-bottom-1">
+                    +{game.lastScoreDelta}
+                  </span>
+                )}
+              </div>
+              <span className="text-xs font-mono text-muted-foreground tabular-nums">
+                ⭐ {game.sessionScore}
+              </span>
+            </div>
+
+            {/* ── Streak Milestone Animation ── */}
+            {game.streakMilestone && (
+              <div className="fixed inset-0 flex items-center justify-center z-50 pointer-events-none">
+                <div className="streak-pop text-center">
+                  <div className="text-7xl font-black bg-gradient-to-r from-amber-400 via-orange-500 to-red-500 bg-clip-text text-transparent drop-shadow-lg">
+                    {game.streakMilestone}
+                  </div>
+                  <div className="text-xl font-bold text-amber-500 mt-1">
+                    🔥 连击达成！
+                  </div>
+                </div>
+              </div>
+            )}
+
             <Card
-              className={`relative touch-pan-y overflow-visible ${lastCASRResult ? (lastCASRResult.result === "remembered" ? "border-green-400" : lastCASRResult.result === "fuzzy" ? "border-yellow-400" : "border-red-400") : ""}`}
+              className={`relative touch-pan-y overflow-visible transition-all duration-300 ${
+                lastCASRResult
+                  ? lastCASRResult.result === "remembered"
+                    ? "feedback-correct"
+                    : lastCASRResult.result === "fuzzy"
+                    ? "feedback-fuzzy"
+                    : "feedback-wrong"
+                  : ""
+              }`}
               onTouchStart={(e) => {
                 (e.currentTarget as any).dataset.touchX = String(e.changedTouches[0]?.clientX ?? 0);
               }}
@@ -1344,22 +1621,35 @@ export default function MemoryPage() {
                 const endX = Number(e.changedTouches[0]?.clientX ?? 0);
                 const deltaX = endX - startX;
                 if (Math.abs(deltaX) < 60 || reviewStepLocked || lastCASRResult) return;
+                // Written mode: swipe left to reveal answer (only before submission)
                 if (currentMode !== "standard" && !showAnswer) {
                   if (deltaX < 0) {
                     revealWrittenAnswer();
                   }
                   return;
                 }
-                if (deltaX < 0) submitCASRReview("forgot");
-                if (deltaX > 0) submitCASRReview("remembered");
+                // Standard mode: swipe left to flip (only before answer is shown)
+                if (currentMode === "standard" && !showAnswer) {
+                  if (deltaX < 0) {
+                    handleFlip();
+                  }
+                  return;
+                }
+                // After answer is revealed: disable swipe gestures, require button tap
+                // This prevents accidental submission while reading the answer
               }}
             >
               {mode !== "standard" && (
-                <div className="absolute top-3 right-3">
+                <div className="absolute top-3 right-3 flex items-center gap-2">
                   <Badge variant="outline" className="text-[10px]">
                     {mode === "hint" ? "💡 " : mode === "timed" ? "⏱ " : "⚡ "}
                     {t(`memory.mode_${mode}`)}
                   </Badge>
+                  {isTimed && timedCountdown > 0 && (
+                    <Badge variant="outline" className="text-[10px] text-amber-500 border-amber-500/30 font-mono tabular-nums">
+                      {timedCountdown}s
+                    </Badge>
+                  )}
                 </div>
               )}
 
@@ -1369,7 +1659,7 @@ export default function MemoryPage() {
                 </p>
 
                 {shouldRevealAnswer && (
-                  <div className="space-y-2 animate-in fade-in duration-200">
+                  <div className="space-y-2 answer-reveal">
                     <div className="w-12 h-px bg-gray-300 dark:bg-gray-600 mx-auto" />
                     <p className="text-xl text-indigo-600 dark:text-indigo-400 leading-relaxed">
                       {card.expected_answer || card.target_text}

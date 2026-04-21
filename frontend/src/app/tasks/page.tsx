@@ -1035,7 +1035,7 @@ export default function TasksPage() {
                       ].map(([key, label]) => (
                         <Input
                           key={key}
-                          value={(mapping as Record<string, string>)[key]}
+                          value={(mapping as unknown as Record<string, string>)[key]}
                           onChange={(e) => setMapping((prev) => ({ ...prev, [key]: e.target.value }))}
                           placeholder={label}
                         />
@@ -1391,8 +1391,8 @@ function TaskCard({
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-2">
               {task.is_pinned && <Pin className="h-3 w-3 text-primary shrink-0" />}
-              <span className={`font-medium truncate ${
-                task.status === "completed" ? "line-through text-muted-foreground" : ""
+              <span className={`font-medium truncate transition-all duration-300 ${
+                task.status === "completed" ? "line-through text-muted-foreground opacity-60" : ""
               }`}>
                 {task.title}
               </span>
