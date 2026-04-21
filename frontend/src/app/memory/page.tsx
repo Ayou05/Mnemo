@@ -98,6 +98,7 @@ interface MemoryStats {
   weak_domains?: Array<{ domain: string; wrong_total: number }>;
   wrong_reasons?: Array<{ reason: string; label: string; count: number }>;
   wrong_reason_trend?: Array<{ day: string; reason: string; label: string; count: number }>;
+  unreleased?: number;
 }
 
 interface TrainingSessionSummary {
@@ -1023,6 +1024,9 @@ export default function MemoryPage() {
             <h1 className="text-2xl font-bold tracking-tight">{t("memory.title")}</h1>
             <p className="text-sm text-muted-foreground mt-0.5">
               {stats?.total || 0} {t("memory.cards")} · {stats?.due_today || 0} {t("memory.dueToday")}
+              {(stats?.unreleased ?? 0) > 0 && (
+                <span className="text-amber-500 ml-1">· {stats!.unreleased} 待释放</span>
+              )}
             </p>
           </div>
           {activeTab === "library" && (

@@ -114,6 +114,7 @@ class MemoryCard(Base):
     last_wrong_reason: Mapped[str | None] = mapped_column(String(20))
     last_score: Mapped[int | None] = mapped_column(Integer)
     last_mode: Mapped[str | None] = mapped_column(String(30))
+    released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # drip-feed: NULL = not yet released
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 

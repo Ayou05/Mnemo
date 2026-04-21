@@ -10,6 +10,7 @@ import { useTheme } from "next-themes";
 import { useSettingsStore } from "@/stores/settings";
 import { api } from "@/lib/api";
 import { toast } from "sonner";
+import { RotateCcw, Droplets, AlertTriangle, Loader2 } from "lucide-react";
 
 interface ImportPreview {
   apply: boolean;
@@ -45,10 +46,48 @@ export default function SettingsPage() {
   const [backupFile, setBackupFile] = useState<File | null>(null);
   const [templateImportMode, setTemplateImportMode] = useState<"append" | "replace_by_month">("append");
   const [importPreview, setImportPreview] = useState<ImportPreview | null>(null);
+  const [resetting, setResetting] = useState(false);
+  const [releasing, setReleasing] = useState(false);
+  const [dripStatus, setDripStatus] = useState<{ total: number; released: number; unreleased: number } | null>(null);
 
   useEffect(() => {
     hydrate();
+    // Fetch drip-feed status
+    api.get("/memory/drip-feed/status").then((res: any) => {
+      setDripStatus(res);
+    }).catch(() => {});
   }, [hydrate]);
+
+  const resetProgress = async (scope: "all" | "domain" | "card_set", domain?: string, cardSetId?: string) => {
+    const scopeLabel = scope === "all" ? "全部卡片" : scope === "domain" ? `领域「${domain}」` : "选中卡组";
+    if (!confirm(`⚠️ 确定要重置 ${scopeLabel} 的学习进度吗？\n\n这将清除所有复习记录和 CASR 状态，卡片本身不会被删除。此操作不可撤销。`)) return;
+    setResetting(true);
+    try {
+      const res = await api.post("/memory/reset", { scope, domain, card_set_id: cardSetId }) as any;
+      toast.success(res.message || `已重置 ${res.reset_count} 张卡片`);
+      // Refresh drip status
+      const status = await api.get("/memory/drip-feed/status") as any;
+      setDripStatus(status);
+    } catch {
+      toast.error("重置失败");
+    } finally {
+      setResetting(false);
+    }
+  };
+
+  const releaseNewCards = async (count: number = 20) => {
+    setReleasing(true);
+    try {
+      const res = await api.post(`/memory/drip-feed/release?limit=${count}`) as any;
+      toast.success(`已释放 ${res.released_count} 张新卡片到复习队列`);
+      const status = await api.get("/memory/drip-feed/status") as any;
+      setDripStatus(status);
+    } catch {
+      toast.error("释放失败");
+    } finally {
+      setReleasing(false);
+    }
+  };
 
   const exportAllData = async () => {
     try {
@@ -222,6 +261,98 @@ export default function SettingsPage() {
                   className="h-9 w-full rounded-lg border border-border bg-card px-3 text-sm"
                 />
               </div>
+            </div>
+          </CardContent>
+        </Card>
+
+        {/* ═══ 学习进度管理 ═══ */}
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <RotateCcw className="h-5 w-5 text-orange-500" />
+              学习进度管理
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <p className="text-sm text-muted-foreground">
+              重置学习进度会清除所有复习记录和 CASR 算法状态，卡片本身不会被删除。适用于测试阶段或想重新开始学习的情况。
+            </p>
+            <div className="flex flex-wrap gap-2">
+              <Button
+                variant="destructive"
+                size="sm"
+                onClick={() => resetProgress("all")}
+                disabled={resetting}
+              >
+                {resetting ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <AlertTriangle className="h-4 w-4 mr-1" />}
+                重置全部进度
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
+
+        {/* ═══ 新卡释放 (Drip-feed) ═══ */}
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <Droplets className="h-5 w-5 text-blue-500" />
+              新卡释放
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <p className="text-sm text-muted-foreground">
+              导入的卡片不会一次性全部进入复习队列，而是逐步释放，避免被大量新卡淹没。
+            </p>
+            {dripStatus && (
+              <div className="grid grid-cols-3 gap-3">
+                <div className="rounded-lg border bg-muted/30 p-3 text-center">
+                  <div className="text-xl font-bold">{dripStatus.total}</div>
+                  <p className="text-xs text-muted-foreground">总卡片</p>
+                </div>
+                <div className="rounded-lg border bg-muted/30 p-3 text-center">
+                  <div className="text-xl font-bold text-emerald-500">{dripStatus.released}</div>
+                  <p className="text-xs text-muted-foreground">已释放</p>
+                </div>
+                <div className="rounded-lg border bg-muted/30 p-3 text-center">
+                  <div className="text-xl font-bold text-amber-500">{dripStatus.unreleased}</div>
+                  <p className="text-xs text-muted-foreground">待释放</p>
+                </div>
+              </div>
+            )}
+            <div className="flex flex-wrap gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => releaseNewCards(10)}
+                disabled={releasing || (dripStatus?.unreleased ?? 0) === 0}
+              >
+                {releasing ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <Droplets className="h-4 w-4 mr-1" />}
+                释放 10 张
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => releaseNewCards(20)}
+                disabled={releasing || (dripStatus?.unreleased ?? 0) === 0}
+              >
+                释放 20 张
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => releaseNewCards(50)}
+                disabled={releasing || (dripStatus?.unreleased ?? 0) === 0}
+              >
+                释放 50 张
+              </Button>
+              <Button
+                variant="default"
+                size="sm"
+                onClick={() => releaseNewCards(9999)}
+                disabled={releasing || (dripStatus?.unreleased ?? 0) === 0}
+              >
+                全部释放
+              </Button>
             </div>
           </CardContent>
         </Card>

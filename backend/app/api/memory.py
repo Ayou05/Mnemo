@@ -349,11 +349,12 @@ async def get_review_queue(
     user_id: str = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db),
 ):
-    """Get cards due for review (next_review <= now), ordered by priority."""
+    """Get cards due for review (next_review <= now), ordered by priority. Only released cards."""
     now = datetime.utcnow()
     query = select(MemoryCard).where(
         and_(
             MemoryCard.user_id == user_id,
+            MemoryCard.released_at.isnot(None),  # drip-feed: only released cards
             MemoryCard.is_mastered == False,
             or_(
                 MemoryCard.next_review <= now,
@@ -514,6 +515,13 @@ async def get_memory_stats(
     )
     difficulties = {str(row.difficulty): row.count for row in diff_result}
 
+    # Drip-feed: unreleased cards count
+    unreleased = (await db.execute(
+        select(func.count()).select_from(MemoryCard).where(
+            and_(MemoryCard.user_id == user_id, MemoryCard.released_at.is_(None))
+        )
+    )).scalar() or 0
+
     return ApiResponse.success(data={
         "total": total,
         "mastered": mastered,
@@ -526,6 +534,7 @@ async def get_memory_stats(
         "weak_domains": weak_domains,
         "wrong_reasons": wrong_reasons,
         "wrong_reason_trend": wrong_reason_trend,
+        "unreleased": unreleased,
     })
 
 
@@ -619,9 +628,13 @@ async def casr_review_queue(
     user_id: str = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db),
 ):
-    """Get cards due for CASR review. Prioritizes: due cards > new cards."""
+    """Get cards due for CASR review. Prioritizes: due cards > new cards. Only released cards."""
     now = datetime.now(timezone.utc)
-    query = select(MemoryCard).where(MemoryCard.user_id == user_id)
+    base_filter = and_(
+        MemoryCard.user_id == user_id,
+        MemoryCard.released_at.isnot(None),  # drip-feed: only released cards
+    )
+    query = select(MemoryCard).where(base_filter)
 
     if card_set_id:
         query = query.where(MemoryCard.card_set_id == card_set_id)
@@ -639,10 +652,10 @@ async def casr_review_queue(
         ).order_by(MemoryCard.confidence.asc()).limit(50)
     )).scalars().all()
 
-    # Priority 2: new cards (review_count == 0)
+    # Priority 2: new released cards (review_count == 0)
     if not due_cards:
         new_query = select(MemoryCard).where(
-            and_(MemoryCard.user_id == user_id, MemoryCard.review_count == 0)
+            and_(base_filter, MemoryCard.review_count == 0)
         )
         if card_set_id:
             new_query = new_query.where(MemoryCard.card_set_id == card_set_id)
@@ -888,4 +901,129 @@ async def wrongbook_review_queue(
             for c in cards
         ],
         "total": len(cards),
+    })
+
+
+# ═══════════════════════════════════════
+# Reset — 重置学习进度
+# ═══════════════════════════════════════
+
+class ResetRequest(BaseModel):
+    scope: str = Field("all", pattern="^(all|domain|card_set)$")
+    domain: str | None = None
+    card_set_id: str | None = None
+
+
+@router.post("/reset")
+async def reset_progress(
+    body: ResetRequest,
+    user_id: str = Depends(get_current_user_id),
+    db: AsyncSession = Depends(get_db),
+):
+    """Reset learning progress for cards. Does NOT delete cards."""
+    query = select(MemoryCard).where(MemoryCard.user_id == user_id)
+
+    if body.scope == "domain" and body.domain:
+        query = query.where(MemoryCard.domain == body.domain)
+    elif body.scope == "card_set" and body.card_set_id:
+        query = query.where(MemoryCard.card_set_id == body.card_set_id)
+
+    result = await db.execute(query)
+    cards = result.scalars().all()
+
+    if not cards:
+        return ApiResponse.error(message="没有找到匹配的卡片")
+
+    card_ids = [c.id for c in cards]
+    now = datetime.now(timezone.utc)
+
+    # Reset CASR state on all matched cards
+    for card in cards:
+        card.confidence = 0
+        card.review_count = 0
+        card.interval_days = 0
+        card.next_review = now
+        card.wrong_count = 0
+        card.is_mastered = False
+        card.avg_think_time = 0
+        card.avg_verify_time = 0
+        card.avg_flips = 0
+        card.ease_factor = 2.5
+        card.last_score = None
+        card.last_wrong_at = None
+
+    # Delete all encounter logs for these cards
+    await db.execute(
+        CardEncounter.__table__.delete().where(CardEncounter.card_id.in_(card_ids))
+    )
+
+    await db.flush()
+
+    return ApiResponse.success(data={
+        "reset_count": len(cards),
+        "scope": body.scope,
+        "message": f"已重置 {len(cards)} 张卡片的学习进度",
+    })
+
+
+# ═══════════════════════════════════════
+# Drip-feed — 智能新卡释放
+# ═══════════════════════════════════════
+
+@router.post("/drip-feed/release")
+async def release_new_cards(
+    limit: int = Query(20, ge=1, le=200),
+    user_id: str = Depends(get_current_user_id),
+    db: AsyncSession = Depends(get_db),
+):
+    """Release unreleased cards into the review queue (drip-feed)."""
+    now = datetime.now(timezone.utc)
+
+    # Find cards that haven't been released yet
+    result = await db.execute(
+        select(MemoryCard).where(
+            and_(
+                MemoryCard.user_id == user_id,
+                MemoryCard.released_at.is_(None),
+            )
+        ).order_by(MemoryCard.created_at.asc()).limit(limit)
+    )
+    cards = result.scalars().all()
+
+    released_count = 0
+    for card in cards:
+        card.released_at = now
+        card.next_review = now  # immediately due
+        released_count += 1
+
+    await db.flush()
+
+    return ApiResponse.success(data={
+        "released_count": released_count,
+        "remaining_unreleased": released_count < limit,  # hint: more available
+    })
+
+
+@router.get("/drip-feed/status")
+async def drip_feed_status(
+    user_id: str = Depends(get_current_user_id),
+    db: AsyncSession = Depends(get_db),
+):
+    """Get drip-feed status: how many cards are released vs unreleased."""
+    total = (await db.execute(
+        select(func.count()).select_from(MemoryCard).where(MemoryCard.user_id == user_id)
+    )).scalar() or 0
+
+    released = (await db.execute(
+        select(func.count()).select_from(MemoryCard).where(
+            and_(MemoryCard.user_id == user_id, MemoryCard.released_at.isnot(None))
+        )
+    )).scalar() or 0
+
+    unreleased = total - released
+
+    return ApiResponse.success(data={
+        "total": total,
+        "released": released,
+        "unreleased": unreleased,
     })

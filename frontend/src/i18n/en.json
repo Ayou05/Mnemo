@@ -410,7 +410,17 @@
     "reminderTime": "Reminder Time",
     "reminderTimeDesc": "Check and notify at this time every day",
     "quietStart": "Quiet Hours Start",
-    "quietEnd": "Quiet Hours End"
+    "quietEnd": "Quiet Hours End",
+    "dataManagement": "Data Management",
+    "progressReset": "Progress Reset",
+    "progressResetDesc": "Reset clears all review history and CASR state. Cards are not deleted.",
+    "resetAll": "Reset All Progress",
+    "dripFeed": "Card Drip-Feed",
+    "dripFeedDesc": "Imported cards are released gradually into the review queue to avoid being overwhelmed.",
+    "totalCards": "Total",
+    "released": "Released",
+    "unreleased": "Unreleased",
+    "releaseAll": "Release All"
   },
   "notifications": {
     "dailyReminderTitle": "Mnemo Study Reminder",

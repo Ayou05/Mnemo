@@ -411,7 +411,17 @@
     "reminderTime": "提醒时间",
     "reminderTimeDesc": "每天这个时间检查并发送提醒",
     "quietStart": "免打扰开始",
-    "quietEnd": "免打扰结束"
+    "quietEnd": "免打扰结束",
+    "dataManagement": "数据管理",
+    "progressReset": "学习进度管理",
+    "progressResetDesc": "重置学习进度会清除所有复习记录和 CASR 算法状态，卡片本身不会被删除。",
+    "resetAll": "重置全部进度",
+    "dripFeed": "新卡释放",
+    "dripFeedDesc": "导入的卡片不会一次性全部进入复习队列，而是逐步释放，避免被大量新卡淹没。",
+    "totalCards": "总卡片",
+    "released": "已释放",
+    "unreleased": "待释放",
+    "releaseAll": "全部释放"
   },
   "notifications": {
     "dailyReminderTitle": "Mnemo 学习提醒",
