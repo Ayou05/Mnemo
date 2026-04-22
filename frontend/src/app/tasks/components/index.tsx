@@ -138,8 +138,9 @@ export function TaskCard({ task, t, onToggleComplete, onTogglePin, onEdit, onDel
 
 // ── Checkin Calendar ──
 
-export function CheckinCalendar({ t, month, onMonthChange, checkins }: {
+export function CheckinCalendar({ t, month, onMonthChange, checkins, onDayClick, selectedDate }: {
   t: (key: string) => string; month: string; onMonthChange: (m: string) => void; checkins: CheckinRecord[];
+  onDayClick?: (dateStr: string) => void; selectedDate?: string | null;
 }) {
   const [year, mon] = month.split("-").map(Number);
   const todayStr = new Date().toISOString().split("T")[0];
@@ -182,11 +183,15 @@ export function CheckinCalendar({ t, month, onMonthChange, checkins }: {
               const isToday = dateStr === todayStr;
               const hasCheckin = checkinDates.has(dateStr);
               const record = checkinMap[dateStr];
+              const isSelected = selectedDate === dateStr;
               return (
                 <div key={dateStr}
-                  className={cn("h-10 rounded-lg flex flex-col items-center justify-center text-sm relative",
+                  onClick={() => onDayClick && onDayClick(dateStr)}
+                  className={cn("h-10 rounded-lg flex flex-col items-center justify-center text-sm relative cursor-pointer transition-colors",
                     isToday && "bg-indigo-100 dark:bg-indigo-900/30 font-bold",
-                    hasCheckin && "bg-green-50 dark:bg-green-900/20")}
+                    hasCheckin && "bg-green-50 dark:bg-green-900/20",
+                    isSelected && "ring-2 ring-primary bg-primary/10",
+                    !isToday && !hasCheckin && "hover:bg-muted/50")}
                   title={record ? `${t("tasks.tasksDone")}: ${record.tasks_completed}, ${t("tasks.studyMinutes")}: ${record.study_minutes}` : ""}>
                   <span className={isToday ? "text-indigo-600 dark:text-indigo-400" : ""}>{day}</span>
                   {hasCheckin && <div className="w-1.5 h-1.5 rounded-full bg-green-500 mt-0.5" />}

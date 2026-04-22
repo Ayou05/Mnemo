@@ -103,6 +103,7 @@ export default function TasksPage() {
   // Records
   const [checkins, setCheckins] = useState<CheckinRecord[]>([]);
   const [calendarMonth, setCalendarMonth] = useState(currentMonth);
+  const [selectedDate, setSelectedDate] = useState<string | null>(null);
   const [weekOffset, setWeekOffset] = useState(0);
 
   // Plan
@@ -254,6 +255,11 @@ export default function TasksPage() {
 
   // ── Filtered & Sorted ──
 
+  const selectedDayTasks = useMemo(() => {
+    if (!selectedDate) return [];
+    return tasks.filter((t) => t.due_date?.startsWith(selectedDate));
+  }, [tasks, selectedDate]);
+
   const filteredTasks = useMemo(() => {
     let result = [...tasks];
     if (search) {
@@ -284,9 +290,9 @@ export default function TasksPage() {
 
   // ── Task CRUD ──
 
-  const openCreateDialog = () => {
+  const openCreateDialog = (prefillDate?: string) => {
     setEditingTask(null);
-    setFormData({ ...BLANK_FORM, category: categories[0]?.name || "其他" });
+    setFormData({ ...BLANK_FORM, category: categories[0]?.name || "其他", due_date: prefillDate || "" });
     setDialogOpen(true);
   };
 
@@ -398,7 +404,7 @@ export default function TasksPage() {
           </div>
           <div className="flex items-center gap-2">
             {activeTab === "tasks" && (
-              <Button onClick={openCreateDialog} className="rounded-xl bg-gradient-brand hover:opacity-90 shadow-lg shadow-primary/20 btn-press">
+              <Button onClick={() => openCreateDialog()} className="rounded-xl bg-gradient-brand hover:opacity-90 shadow-lg shadow-primary/20 btn-press">
                 <Plus className="h-4 w-4 mr-1" />{t("tasks.newTask")}
               </Button>
             )}
@@ -468,7 +474,7 @@ export default function TasksPage() {
             {/* Task List */}
             {filteredTasks.length === 0 ? (
               <EmptyState title={t("tasks.noTasks")} description={t("tasks.noTasksDesc")}
-                action={<Button onClick={openCreateDialog}><Plus className="h-4 w-4 mr-1" />{t("tasks.newTask")}</Button>} />
+                action={<Button onClick={() => openCreateDialog()}><Plus className="h-4 w-4 mr-1" />{t("tasks.newTask")}</Button>} />
             ) : (
               <div className="space-y-2">
                 {filteredTasks.map((task) => (
@@ -575,11 +581,74 @@ export default function TasksPage() {
         {/* ══ TAB: RECORDS ══ */}
         {activeTab === "records" && (
           <>
-            <CheckinCalendar t={t} month={calendarMonth} onMonthChange={setCalendarMonth} checkins={checkins} />
+            <CheckinCalendar t={t} month={calendarMonth} onMonthChange={setCalendarMonth} checkins={checkins}
+              onDayClick={setSelectedDate} selectedDate={selectedDate} />
             <WeekView t={t} tasks={tasks} weekOffset={weekOffset} onWeekChange={setWeekOffset} onToggleComplete={toggleComplete} />
           </>
         )}
       </div>
+
+      {/* Day Detail Dialog */}
+      <Dialog open={!!selectedDate} onOpenChange={(open) => { if (!open) setSelectedDate(null); }}>
+        <DialogContent className="max-w-lg max-h-[85vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>
+              {selectedDate ? new Date(selectedDate + "T00:00:00").toLocaleDateString("zh-CN", { weekday: "long", month: "long", day: "numeric" }) : ""}
+            </DialogTitle>
+            {selectedDate && (
+              <p className="text-sm text-muted-foreground">
+                {selectedDayTasks.length} 个任务
+                {selectedDayTasks.filter((t) => t.status === "completed").length > 0 && (
+                  <span>，已完成 {selectedDayTasks.filter((t) => t.status === "completed").length} 项</span>
+                )}
+              </p>
+            )}
+          </DialogHeader>
+          {selectedDate && (
+            <div className="space-y-2">
+              {selectedDayTasks.length === 0 ? (
+                <div className="text-center py-8 text-muted-foreground">
+                  <p className="text-sm">这一天没有任务</p>
+                  <Button variant="outline" size="sm" className="mt-3"
+                    onClick={() => { setSelectedDate(null); openCreateDialog(selectedDate || undefined); }}>
+                    <Plus className="h-3.5 w-3.5 mr-1" />为这天添加任务
+                  </Button>
+                </div>
+              ) : (
+                selectedDayTasks.map((task) => (
+                  <div key={task.id}
+                    className={`flex items-start gap-3 p-3 rounded-xl border transition-colors ${
+                      task.status === "completed" ? "bg-muted/30 opacity-60" : "bg-card hover:bg-muted/30"
+                    }`}>
+                    <button onClick={() => toggleComplete(task)}
+                      className={`mt-0.5 h-5 w-5 rounded-full border-2 flex items-center justify-center flex-shrink-0 transition-all ${
+                        task.status === "completed"
+                          ? "bg-emerald-500 border-emerald-500 text-white"
+                          : "border-muted-foreground/30 hover:border-primary"
+                      }`}>
+                      {task.status === "completed" && <Check className="h-3 w-3" />}
+                    </button>
+                    <div className="flex-1 min-w-0">
+                      <p className={`text-sm font-medium ${task.status === "completed" ? "line-through text-muted-foreground" : ""}`}>
+                        {task.title}
+                      </p>
+                      <div className="flex items-center gap-2 mt-1">
+                        <Badge variant="secondary" className="text-[10px]">{task.category}</Badge>
+                        {task.priority === "high" && <Badge variant="destructive" className="text-[10px]">高优</Badge>}
+                        {task.is_pinned && <span className="text-[10px]">📌</span>}
+                      </div>
+                    </div>
+                    <button onClick={() => openEditDialog(task)}
+                      className="p-1.5 rounded-lg hover:bg-muted transition-colors shrink-0">
+                      <Edit3 className="h-3.5 w-3.5 text-muted-foreground" />
+                    </button>
+                  </div>
+                ))
+              )}
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
 
       {/* Create/Edit Dialog */}
       <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
