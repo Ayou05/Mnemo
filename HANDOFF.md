@@ -621,7 +621,23 @@ async with httpx.AsyncClient(timeout=30) as client:
 
 ---
 
-## 十五、给下一个 AI Agent 的建议
+## 十五、版本保护
+
+当前稳定版已打 tag `v0.9-stable`，**绝对不要删除这个 tag**。
+
+新 agent 应该在 main 分支上继续开发。如果改崩了，用以下命令回退：
+
+```bash
+git checkout main
+git reset --hard v0.9-stable
+git push --force origin main
+```
+
+建议新 agent 每次做较大改动前先打一个临时 tag（如 `v0.9-wip-xxx`），方便回退。
+
+---
+
+## 十六、给下一个 AI Agent 的建议
 
 ### 优先做这些
 1. **先 git commit + push 所有改动**，确保代码安全
