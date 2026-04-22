@@ -6,7 +6,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { useAuthStore } from "@/stores/auth";
 import { Sidebar } from "@/components/layout/sidebar";
 import { useTranslation } from "@/lib/i18n";
-import { LayoutDashboard, CheckSquare, Brain, CalendarDays, Headphones, Settings } from "lucide-react";
+import { LayoutDashboard, CheckSquare, Brain, CalendarDays, Headphones, Settings, BookOpen } from "lucide-react";
 import { useSettingsStore } from "@/stores/settings";
 import { api } from "@/lib/api";
 import { canSendReminderNow, isWithinQuietHours, todayKey } from "@/lib/notifications";
@@ -28,6 +28,7 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
     { href: "/dashboard", label: t("nav.dashboard"), icon: LayoutDashboard },
     { href: "/tasks", label: t("nav.tasks"), icon: CheckSquare },
     { href: "/memory", label: t("nav.memory"), icon: Brain },
+    { href: "/practice", label: "练习", icon: BookOpen },
     { href: "/schedule", label: t("nav.schedule"), icon: CalendarDays },
     { href: "/courses", label: t("nav.courses"), icon: Headphones },
     { href: "/settings", label: t("nav.settings"), icon: Settings },

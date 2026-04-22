@@ -1,5 +1,7 @@
 import json
 import re
+import uuid
+from collections import Counter
 from difflib import SequenceMatcher
 from datetime import datetime, timedelta, timezone
 
@@ -8,6 +10,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select, func, and_, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import get_settings
 from app.core.database import get_db
 from app.core.response import ApiResponse
 from app.core.security import decode_access_token, oauth2_scheme
@@ -20,14 +23,16 @@ from app.schemas.schemas import (
 )
 
 router = APIRouter()
-
-WRONG_REASON_LABELS = {
-    "mismatch": "答案不匹配",
-    "partial_match": "部分匹配",
-    "missing_content": "段落缺失关键信息",
-}
+_settings = get_settings()
 
 
+from app.core.evaluation import (
+    WRONG_REASON_LABELS, WRONG_REASON_ICONS,
+    _expected_answer, _evaluate_answer, _classify_error_detail,
+    _ai_diagnose_async, _adjust_difficulty,
+    _apply_casr_encounter, _build_cloze_question,
+    _recommend_mode_for_card, sm2_review, _label_reason,
+)
 async def get_current_user_id(token: str = Depends(oauth2_scheme)) -> str:
     payload = decode_access_token(token)
     user_id = payload.get("sub")
@@ -50,171 +55,6 @@ def _normalize_answer(value: str) -> str:
     return re.sub(r"[.,!?;:'\"，。！？；：、（）()\-\[\]【】]", "", value)
 
 
-def _expected_answer(card: MemoryCard, mode: str) -> str:
-    if mode in ("write_zh_to_en", "paragraph"):
-        return card.source_text
-    if mode == "cloze":
-        extra = json.loads(card.extra_data) if card.extra_data else {}
-        return extra.get("cloze_answer") or card.target_text
-    return card.target_text
-
-
-def _evaluate_answer(answer: str, expected: str, mode: str = "write_en_to_zh") -> dict:
-    actual_norm = _normalize_answer(answer)
-    expected_norm = _normalize_answer(expected)
-    if not actual_norm or not expected_norm:
-        score = 0
-    elif actual_norm == expected_norm:
-        score = 100
-    else:
-        score = round(SequenceMatcher(None, actual_norm, expected_norm).ratio() * 100)
-
-    if score >= 92:
-        result = "remembered"
-        verdict = "correct"
-    elif score >= 65:
-        result = "fuzzy"
-        verdict = "partial"
-    else:
-        result = "forgot"
-        verdict = "wrong"
-
-    wrong_reason = None
-    if verdict == "partial":
-        wrong_reason = "partial_match"
-    elif verdict == "wrong":
-        wrong_reason = "mismatch"
-    feedback: list[str] = []
-    if verdict == "correct":
-        feedback.append("核心表达准确，继续保持当前节奏。")
-    elif mode == "paragraph":
-        expected_words = [w for w in re.split(r"\s+", expected.strip()) if w]
-        answer_words = [w for w in re.split(r"\s+", answer.strip()) if w]
-        len_gap = abs(len(expected_words) - len(answer_words))
-        if len_gap >= 6:
-            wrong_reason = "missing_content"
-            feedback.append("段落长度差异较大，可能遗漏了部分关键信息。")
-        elif len_gap >= 3:
-            feedback.append("段落主体已覆盖，建议补足细节信息。")
-        if score < 65:
-            feedback.append("建议先按句对齐原文，再进行整段默写。")
-        elif score < 92:
-            feedback.append("主要内容正确，重点优化术语和固定搭配。")
-    else:
-        if score < 65:
-            feedback.append("建议先做一轮提示模式，再回到默写。")
-        else:
-            feedback.append("答案接近正确，优先修正关键词拼写。")
-    return {
-        "score": score,
-        "result": result,
-        "verdict": verdict,
-        "wrong_reason": wrong_reason,
-        "feedback": feedback,
-        "expected_answer": expected,
-        "normalized_answer": actual_norm,
-        "normalized_expected": expected_norm,
-    }
-
-
-def _label_reason(reason: str | None) -> str:
-    if not reason:
-        return "未知"
-    return WRONG_REASON_LABELS.get(reason, reason)
-
-
-def _apply_casr_encounter(card: MemoryCard, user_id: str, body: CASREncounter) -> dict:
-    confidence_before = card.confidence or 0
-    update = process_encounter(
-        confidence=confidence_before,
-        avg_think_time=card.avg_think_time or 0,
-        avg_verify_time=card.avg_verify_time or 0,
-        avg_flips=card.avg_flips or 0,
-        review_count=card.review_count,
-        result=body.result,
-        think_time=body.think_time,
-        verify_time=body.verify_time,
-        flip_count=body.flip_count,
-    )
-
-    card.confidence = update["confidence"]
-    card.avg_think_time = update["avg_think_time"]
-    card.avg_verify_time = update["avg_verify_time"]
-    card.avg_flips = update["avg_flips"]
-    card.review_count = update["review_count"]
-    card.interval_days = update["interval_days"]
-    card.next_review = update["next_review"]
-    card.is_mastered = update["is_mastered"]
-    if body.result == "forgot":
-        card.wrong_count = (card.wrong_count or 0) + 1
-        card.last_wrong_at = datetime.now(timezone.utc)
-
-    return {
-        "card_id": card.id,
-        "confidence_before": round(confidence_before, 1),
-        "confidence_after": update["confidence"],
-        "result": body.result,
-        "evolution_mode": update["evolution_mode"],
-        "scheduled_interval_min": update["scheduled_interval_min"],
-        "is_mastered": update["is_mastered"],
-        "wrong_count": card.wrong_count,
-    }
-
-
-def _build_cloze_question(text: str) -> dict:
-    """Build a deterministic cloze blank from a phrase or sentence."""
-    tokens = re.findall(r"\w+|[^\w\s]", text, flags=re.UNICODE)
-    word_indexes = [i for i, t in enumerate(tokens) if re.match(r"\w+", t, flags=re.UNICODE)]
-    if not word_indexes:
-        return {"prompt_text": text, "answer": text}
-    idx = word_indexes[len(word_indexes) // 2]
-    answer = tokens[idx]
-    tokens[idx] = "_____"
-    return {"prompt_text": "".join(tokens), "answer": answer}
-
-
-# ═══════════════════════════════════════
-# SM-2 Spaced Repetition Algorithm
-# ═══════════════════════════════════════
-
-def sm2_review(card: MemoryCard, quality: int) -> dict:
-    """
-    SM-2 algorithm. quality: 0-5
-    0 = complete blackout, 5 = perfect
-    Returns updated fields dict.
-    """
-    q = max(0, min(5, quality))
-
-    if q >= 3:
-        # Correct response
-        if card.review_count == 0:
-            card.interval_days = 1
-        elif card.review_count == 1:
-            card.interval_days = 6
-        else:
-            card.interval_days = round(card.interval_days * card.ease_factor)
-        card.review_count += 1
-    else:
-        # Incorrect — reset
-        card.review_count = 0
-        card.interval_days = 1
-
-    # Update ease factor
-    card.ease_factor = max(1.3, card.ease_factor + (0.1 - (5 - q) * (0.08 + (5 - q) * 0.02)))
-
-    # Next review
-    card.next_review = datetime.utcnow() + timedelta(days=card.interval_days)
-
-    # Mastered if reviewed 5+ times with interval >= 21 days
-    card.is_mastered = card.review_count >= 5 and card.interval_days >= 21
-
-    return {
-        "interval_days": card.interval_days,
-        "ease_factor": round(card.ease_factor, 2),
-        "next_review": card.next_review.isoformat(),
-        "review_count": card.review_count,
-        "is_mastered": card.is_mastered,
-    }
 
 
 # ═══════════════════════════════════════
@@ -515,6 +355,26 @@ async def get_memory_stats(
     )
     difficulties = {str(row.difficulty): row.count for row in diff_result}
 
+    # Effective difficulty: based on actual confidence/performance
+    # Maps confidence ranges to difficulty buckets
+    cards_for_eff = await db.execute(
+        select(MemoryCard.confidence, MemoryCard.difficulty)
+        .where(MemoryCard.user_id == user_id)
+    )
+    effective_diff = {"1": 0, "2": 0, "3": 0, "4": 0, "5": 0}
+    for row in cards_for_eff:
+        conf = row.confidence or 0
+        if conf >= 90:
+            effective_diff["1"] += 1  # mastered → easy
+        elif conf >= 70:
+            effective_diff["2"] += 1
+        elif conf >= 50:
+            effective_diff["3"] += 1
+        elif conf >= 30:
+            effective_diff["4"] += 1
+        else:
+            effective_diff["5"] += 1  # struggling → hard
+
     # Drip-feed: unreleased cards count
     unreleased = (await db.execute(
         select(func.count()).select_from(MemoryCard).where(
@@ -531,6 +391,7 @@ async def get_memory_stats(
         "mastery_rate": round(mastered / total * 100, 1) if total > 0 else 0,
         "domains": domains,
         "difficulties": difficulties,
+        "effective_difficulties": effective_diff,
         "weak_domains": weak_domains,
         "wrong_reasons": wrong_reasons,
         "wrong_reason_trend": wrong_reason_trend,
@@ -554,9 +415,48 @@ async def get_wrongbook(
         query.order_by(MemoryCard.wrong_count.desc(), MemoryCard.last_wrong_at.desc().nullslast()).limit(limit)
     )
     cards = result.scalars().all()
+
+    # Enrich each card with recent wrong encounter history
+    card_ids = [c.id for c in cards]
+    wrong_history: dict[str, list[dict]] = {}
+    if card_ids:
+        encounters = (await db.execute(
+            select(CardEncounter)
+            .where(and_(
+                CardEncounter.card_id.in_(card_ids),
+                CardEncounter.user_id == user_id,
+                CardEncounter.result.in_(["forgot", "fuzzy"]),
+            ))
+            .order_by(CardEncounter.created_at.desc())
+        )).scalars().all()
+        for enc in encounters:
+            wrong_history.setdefault(enc.card_id, []).append({
+                "result": enc.result,
+                "wrong_reason": enc.wrong_reason,
+                "confidence_before": round(enc.confidence_before, 1),
+                "confidence_after": round(enc.confidence_after, 1),
+                "created_at": enc.created_at.isoformat() if enc.created_at else None,
+            })
+        # Keep only last 5 per card
+        for cid in wrong_history:
+            wrong_history[cid] = wrong_history[cid][:5]
+
+    items = []
+    for c in cards:
+        item = MemoryCardOut.model_validate(c).model_dump()
+        item["wrong_history"] = wrong_history.get(c.id, [])
+        items.append(item)
+
+    # Wrong reason distribution across all wrongbook cards
+    reason_dist = {}
+    for c in cards:
+        reason = c.last_wrong_reason or "mismatch"
+        reason_dist[reason] = reason_dist.get(reason, 0) + 1
+
     return ApiResponse.success(data={
-        "items": [MemoryCardOut.model_validate(c).model_dump() for c in cards],
+        "items": items,
         "total": len(cards),
+        "reason_distribution": {k: v for k, v in sorted(reason_dist.items(), key=lambda x: -x[1])},
     })
 
 
@@ -615,6 +515,9 @@ async def delete_card(
         raise HTTPException(status_code=404, detail="卡片不存在")
     await db.delete(card)
     return ApiResponse.success(message="已删除")
+
+
+
 
 
 # ═══════════════════════════════════════
@@ -677,6 +580,7 @@ async def casr_review_queue(
             "evolution_mode": get_evolution_mode(c.confidence or 0),
             "card_set_id": c.card_set_id,
             "mode": mode,
+            "recommended_mode": _recommend_mode_for_card(c),
             "prompt_text": c.source_text,
             "expected_answer": c.target_text,
         })
@@ -752,12 +656,32 @@ async def evaluate_written_answer(
     response = _apply_casr_encounter(card, user_id, encounter_body)
     card.last_score = int(evaluation["score"])
     card.last_mode = body.mode
-    if evaluation["result"] == "forgot":
-        card.last_wrong_reason = evaluation["wrong_reason"] or "mismatch"
-    elif evaluation["result"] == "fuzzy":
-        card.last_wrong_reason = evaluation["wrong_reason"] or "partial_match"
+
+    # Auto-trigger AI diagnosis for wrong/fuzzy answers
+    ai_diagnosis = None
+    if evaluation["result"] in ("forgot", "fuzzy"):
+        # Set rule-based reason immediately
+        card.last_wrong_reason = evaluation["wrong_reason"] or (
+            "mismatch" if evaluation["result"] == "forgot" else "partial_match"
+        )
+        # Fire AI diagnosis in background
+        ai_diagnosis = await _ai_diagnose_async(
+            source_text=card.source_text or "",
+            expected=expected,
+            actual=body.answer,
+            mode=body.mode,
+            score=evaluation["score"],
+        )
+        if ai_diagnosis:
+            # Override with AI's more accurate classification
+            card.last_wrong_reason = ai_diagnosis.get("reason_key", card.last_wrong_reason)
+            card.last_wrong_detail = ai_diagnosis.get("error_detail", "")
     else:
         card.last_wrong_reason = None
+        card.last_wrong_detail = None
+
+    # Dynamic difficulty adjustment
+    _adjust_difficulty(card, evaluation["result"], evaluation["score"])
 
     encounter = CardEncounter(
         card_id=card_id,
@@ -766,7 +690,7 @@ async def evaluate_written_answer(
         verify_time=body.verify_time,
         flip_count=body.flip_count,
         result=evaluation["result"],
-        wrong_reason=evaluation.get("wrong_reason"),
+        wrong_reason=card.last_wrong_reason,
         confidence_before=response["confidence_before"],
         confidence_after=response["confidence_after"],
         scheduled_interval_min=response["scheduled_interval_min"],
@@ -774,12 +698,17 @@ async def evaluate_written_answer(
     db.add(encounter)
     await db.flush()
 
-    return ApiResponse.success(data={
+    resp_data = {
         **response,
         **evaluation,
         "answer": body.answer,
         "mode": body.mode,
-    })
+    }
+    # Attach AI diagnosis if available
+    if ai_diagnosis:
+        resp_data["ai_diagnosis"] = ai_diagnosis
+
+    return ApiResponse.success(data=resp_data)
 
 
 @router.get("/training/session-summary")
@@ -1027,3 +956,383 @@ async def drip_feed_status(
         "released": released,
         "unreleased": unreleased,
     })
+
+
+# ── LLM-powered error diagnosis ──
+
+class DiagnoseRequest(BaseModel):
+    source_text: str
+    expected: str
+    actual: str
+    mode: str
+    score: int
+
+
+@router.post("/diagnose")
+async def diagnose_error(
+    body: DiagnoseRequest,
+    user_id: str = Depends(get_current_user_id),
+):
+    """Use LLM to provide detailed error analysis for a wrong answer."""
+    if not _settings.DASHSCOPE_API_KEY:
+        raise HTTPException(status_code=503, detail="AI 服务未配置")
+
+    diagnosis = await _ai_diagnose_async(
+        source_text=body.source_text,
+        expected=body.expected,
+        actual=body.actual,
+        mode=body.mode,
+        score=body.score,
+    )
+    if diagnosis:
+        return ApiResponse.success(data=diagnosis)
+    return ApiResponse.success(data={
+        "error_type": "分析失败",
+        "error_detail": "AI 返回格式异常，请重试。",
+        "suggestions": [],
+        "encouragement": "继续加油！",
+        "reason_key": "mismatch",
+    })
+
+
+# ── Smart mode recommendation ──
+
+@router.get("/recommend-mode")
+async def recommend_mode(
+    user_id: str = Depends(get_current_user_id),
+    db: AsyncSession = Depends(get_db),
+):
+    """Recommend the best training mode based on performance + error patterns."""
+
+    cards = (await db.execute(
+        select(MemoryCard).where(MemoryCard.user_id == user_id)
+    )).scalars().all()
+
+    if not cards:
+        return ApiResponse.success(data={
+            "recommended_mode": "write_en_to_zh",
+            "mode_label": "看英文写中文",
+            "reason": "还没有卡片，先从基础模式开始。",
+            "signals": {},
+        })
+
+    total = len(cards)
+    reviewed = [c for c in cards if c.review_count > 0]
+    wrong_cards = [c for c in cards if (c.wrong_count or 0) > 0]
+    mastered = sum(1 for c in cards if c.is_mastered)
+    avg_confidence = sum(c.confidence or 0 for c in cards) / total
+
+    # Mostly new cards → basic recall
+    if len(reviewed) < total * 0.3:
+        return ApiResponse.success(data={
+            "recommended_mode": "write_en_to_zh",
+            "mode_label": "看英文写中文",
+            "reason": f"大部分卡片还没学过（{total - len(reviewed)}/{total} 张新卡），建议先从基础回忆开始。",
+            "signals": {"new_ratio": round((total - len(reviewed)) / total, 2), "avg_confidence": round(avg_confidence, 1)},
+        })
+
+    # Error-pattern-driven recommendations
+    wrong_reason_counts: dict[str, int] = {}
+    for c in wrong_cards:
+        reason = c.last_wrong_reason or "forgot"
+        wrong_reason_counts[reason] = wrong_reason_counts.get(reason, 0) + 1
+
+    top_reasons = sorted(wrong_reason_counts.items(), key=lambda x: -x[1])
+    if top_reasons:
+        top_reason, top_count = top_reasons[0]
+
+        if top_reason == "spelling" and top_count >= 2:
+            return ApiResponse.success(data={
+                "recommended_mode": "cloze",
+                "mode_label": "完形填空",
+                "reason": f"近期拼写错误较多（{top_count} 次），完形填空能精准训练单词拼写。",
+                "signals": {"top_error": top_reason, "top_error_count": top_count, "avg_confidence": round(avg_confidence, 1)},
+            })
+        if top_reason == "word_order" and top_count >= 2:
+            return ApiResponse.success(data={
+                "recommended_mode": "paragraph",
+                "mode_label": "段落默写",
+                "reason": f"近期词序错误较多（{top_count} 次），段落默写能强化语序记忆。",
+                "signals": {"top_error": top_reason, "top_error_count": top_count, "avg_confidence": round(avg_confidence, 1)},
+            })
+        if top_reason in ("forgot", "omission", "missing_content") and top_count >= 3:
+            return ApiResponse.success(data={
+                "recommended_mode": "write_zh_to_en",
+                "mode_label": "看中文写英文",
+                "reason": f"近期遗忘/遗漏较多（{top_count} 次），反向回忆能激活主动输出能力。",
+                "signals": {"top_error": top_reason, "top_error_count": top_count, "avg_confidence": round(avg_confidence, 1)},
+            })
+        if top_reason == "grammar" and top_count >= 2:
+            return ApiResponse.success(data={
+                "recommended_mode": "paragraph",
+                "mode_label": "段落默写",
+                "reason": f"近期语法错误较多（{top_count} 次），段落默写能强化语法运用。",
+                "signals": {"top_error": top_reason, "top_error_count": top_count, "avg_confidence": round(avg_confidence, 1)},
+            })
+
+    # Confidence-driven fallback
+    if avg_confidence >= 75:
+        mode, mode_label = "paragraph", "段落默写"
+        reason = f"平均掌握度 {avg_confidence:.0f}%，可以挑战段落默写来巩固。"
+    elif avg_confidence >= 50:
+        mode, mode_label = "cloze", "完形填空"
+        reason = f"平均掌握度 {avg_confidence:.0f}%，完形填空能平衡难度和效果。"
+    elif avg_confidence >= 30:
+        mode, mode_label = "write_zh_to_en", "看中文写英文"
+        reason = f"平均掌握度 {avg_confidence:.0f}%，反向回忆能加强薄弱环节。"
+    else:
+        mode, mode_label = "write_en_to_zh", "看英文写中文"
+        reason = f"平均掌握度 {avg_confidence:.0f}%，建议先从基础回忆开始。"
+
+    return ApiResponse.success(data={
+        "recommended_mode": mode,
+        "mode_label": mode_label,
+        "reason": reason,
+        "signals": {"avg_confidence": round(avg_confidence, 1), "mastered_ratio": round(mastered / total, 2)},
+    })
+
+
+# ── Session Insight — AI-powered post-review summary ──
+
+class SessionInsightRequest(BaseModel):
+    """Frontend sends session stats; backend enriches with DB data and calls LLM."""
+    remembered: int = 0
+    fuzzy: int = 0
+    forgot: int = 0
+    score: int = 0
+    card_ids: list[str] = Field(default_factory=list)
+
+
+@router.post("/training/session-insight")
+async def session_insight(
+    body: SessionInsightRequest,
+    user_id: str = Depends(get_current_user_id),
+    db: AsyncSession = Depends(get_db),
+):
+    """Generate an AI-powered summary after a review session completes."""
+    total = body.remembered + body.fuzzy + body.forgot
+    if total == 0:
+        return ApiResponse.success(data={"summary": "", "weak_points": [], "suggestions": [], "encouragement": ""})
+
+    # Gather encounter data for this session's cards
+    card_data = []
+    if body.card_ids:
+        cards_result = await db.execute(
+            select(MemoryCard).where(
+                and_(MemoryCard.id.in_(body.card_ids), MemoryCard.user_id == user_id)
+            )
+        )
+        cards = cards_result.scalars().all()
+        card_map = {c.id: c for c in cards}
+
+        # Get recent encounters (last 30 min) for these cards
+        since = datetime.now(timezone.utc) - timedelta(minutes=30)
+        enc_result = await db.execute(
+            select(CardEncounter).where(
+                and_(
+                    CardEncounter.card_id.in_(body.card_ids),
+                    CardEncounter.user_id == user_id,
+                    CardEncounter.created_at >= since,
+                )
+            ).order_by(CardEncounter.created_at.desc())
+        )
+        encounters = enc_result.scalars().all()
+
+        # Build per-card summary
+        for cid in body.card_ids:
+            card = card_map.get(cid)
+            if not card:
+                continue
+            card_encs = [e for e in encounters if e.card_id == cid]
+            last_enc = card_encs[0] if card_encs else None
+            card_data.append({
+                "source": card.source_text[:80],
+                "target": card.target_text[:80],
+                "confidence": round(card.confidence or 0, 1),
+                "result": last_enc.result if last_enc else "unknown",
+                "wrong_reason": last_enc.wrong_reason if last_enc else None,
+                "think_time_ms": last_enc.think_time if last_enc else 0,
+            })
+
+    # Wrong reason distribution
+    wrong_reasons = [d["wrong_reason"] for d in card_data if d.get("wrong_reason")]
+    reason_counts = Counter(wrong_reasons)
+
+    # Build prompt
+    accuracy = round((body.remembered + body.fuzzy) / total * 100) if total > 0 else 0
+    weak_cards = [d for d in card_data if d["result"] in ("forgot", "fuzzy")]
+
+    prompt = f"""你是一个学习助手，请根据以下复习数据生成一段简短的学习总结。
+
+## 本次复习数据
+- 总卡片数：{total}
+- 记住：{body.remembered}，模糊：{body.fuzzy}，忘记：{body.forgot}
+- 正确率：{accuracy}%
+- 积分：{body.score}
+- 错误类型分布：{dict(reason_counts) if reason_counts else "无"}
+
+## 薄弱卡片
+{json.dumps(weak_cards[:5], ensure_ascii=False, indent=2) if weak_cards else "无薄弱卡片"}
+
+## 要求
+请用 JSON 格式返回，包含以下字段：
+1. "summary"：一句话总结本次复习表现（20字以内，口语化，带鼓励）
+2. "weak_points"：薄弱环节列表（最多3条，每条15字以内，指出具体问题）
+3. "suggestions"：学习建议（最多2条，每条20字以内，具体可执行）
+4. "encouragement"：一句鼓励的话（15字以内）
+
+只返回 JSON，不要其他内容。"""
+
+    if not _settings.DEEPSEEK_API_KEY:
+        # Fallback: rule-based insight without LLM
+        fallback = {
+            "summary": f"复习了 {total} 张卡片，正确率 {accuracy}%",
+            "weak_points": [],
+            "suggestions": [],
+            "encouragement": "继续加油！" if accuracy < 80 else "表现不错！",
+        }
+        if weak_cards:
+            top_reasons = reason_counts.most_common(3)
+            fallback["weak_points"] = [
+                f"{_label_reason(r)} 出现 {c} 次" for r, c in top_reasons
+            ]
+            fallback["suggestions"] = ["建议明天重点复习薄弱卡片"]
+        return ApiResponse.success(data=fallback)
+
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(
+                "https://api.deepseek.com/chat/completions",
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {_settings.DEEPSEEK_API_KEY}",
+                },
+                json={
+                    "model": "deepseek-chat",
+                    "messages": [
+                        {"role": "system", "content": "你是一个简洁的学习助手，只返回 JSON。"},
+                        {"role": "user", "content": prompt},
+                    ],
+                    "temperature": 0.7,
+                },
+            )
+            result = resp.json()
+            content = result["choices"][0]["message"]["content"].strip()
+            # Parse JSON from response (handle markdown code blocks)
+            if content.startswith("```"):
+                content = content.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+            insight = json.loads(content)
+            return ApiResponse.success(data=insight)
+    except Exception:
+        return ApiResponse.success(data={
+            "summary": f"复习了 {total} 张卡片，正确率 {accuracy}%",
+            "weak_points": [],
+            "suggestions": [],
+            "encouragement": "继续加油！",
+        })
+
+
+# ── Proactive Quiz — AI-generated quiz based on weak points ──
+
+@router.post("/proactive-quiz")
+async def proactive_quiz(
+    user_id: str = Depends(get_current_user_id),
+    db: AsyncSession = Depends(get_db),
+):
+    """Generate a quiz question targeting the user's weakest knowledge points."""
+    # 1. Find weak cards from recent encounters (last 7 days)
+    since = datetime.now(timezone.utc) - timedelta(days=7)
+    enc_result = await db.execute(
+        select(CardEncounter, MemoryCard)
+        .join(MemoryCard, CardEncounter.card_id == MemoryCard.id)
+        .where(and_(
+            CardEncounter.user_id == user_id,
+            CardEncounter.created_at >= since,
+            CardEncounter.result.in_(["forgot", "fuzzy"]),
+        ))
+        .order_by(CardEncounter.created_at.desc())
+        .limit(30)
+    )
+    weak_rows = enc_result.all()
+
+    if not weak_rows:
+        return ApiResponse.success(data={"has_quiz": False, "reason": "no_weak_points"})
+
+    # 2. Build weak point summary (deduplicate by card)
+    weak_cards = []
+    seen = set()
+    for enc, card in weak_rows:
+        if card.id in seen:
+            continue
+        seen.add(card.id)
+        weak_cards.append({
+            "source": card.source_text[:100],
+            "target": card.target_text[:100],
+            "confidence": round(card.confidence or 0, 1),
+            "wrong_reason": enc.wrong_reason,
+            "domain": card.domain,
+            "difficulty": card.difficulty,
+        })
+
+    # 3. Error type distribution
+    reason_counts = Counter(enc.wrong_reason for enc, _ in weak_rows if enc.wrong_reason)
+
+    # 4. Generate quiz with DeepSeek
+    prompt = f"""你是一个英语学习助手。根据用户的薄弱数据，出一道简短的测验题。
+
+## 薄弱卡片数据
+{json.dumps(weak_cards[:6], ensure_ascii=False, indent=2)}
+
+## 错误类型分布
+{dict(reason_counts.most_common(5))}
+
+## 要求
+- 出一道题，针对最突出的薄弱点
+- 题型选择最合适的：填空题(fill_blank)、选择题(multiple_choice)、翻译题(translation)、改错题(correction)
+- 题目要简短，一句话能说完
+- 难度适中
+- 返回 JSON 格式：
+{{
+  "question": "题目内容",
+  "type": "fill_blank|multiple_choice|translation|correction",
+  "options": ["A. ...", "B. ...", "C. ...", "D. ..."],
+  "answer": "正确答案",
+  "explanation": "简要解析（30字以内）",
+  "hint": "一个小提示（可选，不给就直接null）",
+  "topic": "考点名称（如：虚拟语气、现在完成时）"
+}}
+
+只返回 JSON，不要其他内容。"""
+
+    if not _settings.DEEPSEEK_API_KEY:
+        return ApiResponse.success(data={"has_quiz": False, "reason": "no_api_key"})
+
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(
+                "https://api.deepseek.com/chat/completions",
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {_settings.DEEPSEEK_API_KEY}",
+                },
+                json={
+                    "model": "deepseek-chat",
+                    "messages": [
+                        {"role": "system", "content": "你是一个简洁的学习助手，只返回 JSON。"},
+                        {"role": "user", "content": prompt},
+                    ],
+                    "temperature": 0.8,
+                },
+            )
+            result = resp.json()
+            content = result["choices"][0]["message"]["content"].strip()
+            if content.startswith("```"):
+                content = content.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+            quiz = json.loads(content)
+            quiz["has_quiz"] = True
+            quiz["quiz_id"] = str(uuid.uuid4())
+            return ApiResponse.success(data=quiz)
+    except Exception:
+        return ApiResponse.success(data={"has_quiz": False, "reason": "llm_error"})

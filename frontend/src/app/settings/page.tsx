@@ -10,7 +10,8 @@ import { useTheme } from "next-themes";
 import { useSettingsStore } from "@/stores/settings";
 import { api } from "@/lib/api";
 import { toast } from "sonner";
-import { RotateCcw, Droplets, AlertTriangle, Loader2 } from "lucide-react";
+import { RotateCcw, Droplets, AlertTriangle, Loader2, Target, X, ChevronDown, Search } from "lucide-react";
+import { GoalPicker } from "@/components/goal-picker";
 
 interface ImportPreview {
   apply: boolean;
@@ -36,6 +37,8 @@ export default function SettingsPage() {
     reminderTime,
     quietHoursStart,
     quietHoursEnd,
+    practiceGoal,
+    setPracticeGoal,
     setDefaultReviewMode,
     setEnableReviewReminder,
     setReminderTime,
@@ -49,6 +52,7 @@ export default function SettingsPage() {
   const [resetting, setResetting] = useState(false);
   const [releasing, setReleasing] = useState(false);
   const [dripStatus, setDripStatus] = useState<{ total: number; released: number; unreleased: number } | null>(null);
+  const [showGoalPicker, setShowGoalPicker] = useState(false);
 
   useEffect(() => {
     hydrate();
@@ -188,6 +192,39 @@ export default function SettingsPage() {
                 </Button>
                 <Button variant={locale === "en" ? "default" : "outline"} onClick={() => setLocale("en")}>
                   English
+                </Button>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle>🎯 备考目标</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="flex items-center justify-between gap-4">
+              <div className="flex-1 min-w-0">
+                {practiceGoal ? (
+                  <div>
+                    <p className="font-medium truncate">{practiceGoal}</p>
+                    <p className="text-sm text-muted-foreground">AI 会根据目标推荐练习内容</p>
+                  </div>
+                ) : (
+                  <div>
+                    <p className="font-medium text-muted-foreground">未设置</p>
+                    <p className="text-sm text-muted-foreground">设置后 AI 会推荐针对性练习</p>
+                  </div>
+                )}
+              </div>
+              <div className="flex gap-2 shrink-0">
+                {practiceGoal && (
+                  <Button variant="ghost" size="sm" onClick={() => setPracticeGoal(null)}>
+                    清除
+                  </Button>
+                )}
+                <Button size="sm" onClick={() => setShowGoalPicker(true)}>
+                  {practiceGoal ? "更换" : "设置"}
                 </Button>
               </div>
             </div>
@@ -413,6 +450,13 @@ export default function SettingsPage() {
           </CardContent>
         </Card>
       </div>
+
+      <GoalPicker
+        open={showGoalPicker}
+        onClose={() => setShowGoalPicker(false)}
+        onSelect={(g) => setPracticeGoal(g)}
+        currentGoal={practiceGoal}
+      />
     </AppLayout>
   );
 }

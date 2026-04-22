@@ -1,7 +1,7 @@
 import uuid
-from datetime import datetime
+from datetime import datetime, date
 
-from sqlalchemy import String, Boolean, DateTime, ForeignKey, Text, Integer, Float, func
+from sqlalchemy import String, Boolean, DateTime, Date, ForeignKey, Text, Integer, Float, func, JSON
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
@@ -18,6 +18,7 @@ class User(Base):
     avatar_url: Mapped[str | None] = mapped_column(String(500))
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     locale: Mapped[str] = mapped_column(String(10), default="zh")
+    settings: Mapped[dict | None] = mapped_column(JSON, default=dict, server_default="{}")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
@@ -112,6 +113,7 @@ class MemoryCard(Base):
     wrong_count: Mapped[int] = mapped_column(Integer, default=0)
     last_wrong_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_wrong_reason: Mapped[str | None] = mapped_column(String(20))
+    last_wrong_detail: Mapped[str | None] = mapped_column(Text)  # LLM diagnosis detail
     last_score: Mapped[int | None] = mapped_column(Integer)
     last_mode: Mapped[str | None] = mapped_column(String(30))
     released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # drip-feed: NULL = not yet released
@@ -191,6 +193,7 @@ class ScheduleEntry(Base):
     end_time: Mapped[str] = mapped_column(String(10))
     weeks: Mapped[str | None] = mapped_column(String(200))
     color: Mapped[str | None] = mapped_column(String(20))
+    event_date: Mapped[date | None] = mapped_column(Date)  # NULL = weekly recurring
 
     schedule = relationship("Schedule", back_populates="entries")
 
@@ -239,3 +242,69 @@ class TaskPlanEntry(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
     template = relationship("TaskPlanTemplate", back_populates="entries")
+
+
+class PracticeSet(Base):
+    """练习集 — 一次生成/导入的题目组"""
+    __tablename__ = "practice_sets"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    title: Mapped[str] = mapped_column(String(200), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text)
+    source: Mapped[str] = mapped_column(String(20), default="generate")  # generate / pdf
+    source_ref: Mapped[str | None] = mapped_column(Text)  # user prompt or PDF filename
+    question_count: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    questions = relationship("PracticeQuestion", back_populates="practice_set", cascade="all, delete-orphan")
+
+
+class PracticeQuestion(Base):
+    """练习题目"""
+    __tablename__ = "practice_questions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    practice_set_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("practice_sets.id", ondelete="SET NULL"), index=True)
+    # Content
+    question_text: Mapped[str] = mapped_column(Text, nullable=False)
+    options: Mapped[str | None] = mapped_column(Text)  # JSON: ["A. ...", "B. ..."]
+    answer: Mapped[str] = mapped_column(Text, nullable=False)
+    explanation: Mapped[str | None] = mapped_column(Text)
+    # Classification
+    question_type: Mapped[str] = mapped_column(String(30), default="multiple_choice")  # multiple_choice / fill_blank / translation / reading / correction
+    category: Mapped[str] = mapped_column(String(50), default="语法")  # 语法/阅读/翻译/词汇/百科
+    topic: Mapped[str | None] = mapped_column(String(100))  # 虚拟语气、定语从句...
+    # Metadata
+    difficulty: Mapped[int] = mapped_column(Integer, default=3)  # 1-5
+    sort_order: Mapped[int] = mapped_column(Integer, default=0)
+    # CASR tracking
+    confidence: Mapped[float] = mapped_column(Float, default=0.0)  # 0-100
+    next_review: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    review_count: Mapped[int] = mapped_column(Integer, default=0)
+    wrong_count: Mapped[int] = mapped_column(Integer, default=0)
+    last_wrong_reason: Mapped[str | None] = mapped_column(String(30))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    practice_set = relationship("PracticeSet", back_populates="questions")
+
+
+class PracticeAnswer(Base):
+    """做题记录 — 每道题的作答"""
+    __tablename__ = "practice_answers"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    question_id: Mapped[str] = mapped_column(String(36), ForeignKey("practice_questions.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    session_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    # Answer
+    user_answer: Mapped[str] = mapped_column(Text, default="")
+    is_correct: Mapped[bool] = mapped_column(Boolean, default=False)
+    wrong_reason: Mapped[str | None] = mapped_column(String(30))
+    # Timing
+    think_time_ms: Mapped[int] = mapped_column(Integer, default=0)
+    # CASR snapshot
+    confidence_before: Mapped[float] = mapped_column(Float, default=0.0)
+    confidence_after: Mapped[float] = mapped_column(Float, default=0.0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

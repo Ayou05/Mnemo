@@ -342,6 +342,7 @@ class ScheduleEntryCreate(BaseModel):
     end_time: str = Field(..., pattern=r"^\d{2}:\d{2}$")
     weeks: Optional[list[int]] = None
     color: Optional[str] = None
+    event_date: Optional[str] = None  # YYYY-MM-DD, NULL = weekly recurring
 
 
 class ScheduleEntryOut(BaseModel):
@@ -354,6 +355,7 @@ class ScheduleEntryOut(BaseModel):
     end_time: str
     weeks: Optional[str]
     color: Optional[str]
+    event_date: Optional[str] = None
 
     model_config = {"from_attributes": True}
 

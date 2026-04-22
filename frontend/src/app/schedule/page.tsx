@@ -23,6 +23,7 @@ import {
   Plus,
   Trash2,
   Edit3,
+  Pencil,
   CalendarDays,
   AlertTriangle,
   MapPin,
@@ -37,6 +38,10 @@ import {
   FileSpreadsheet,
   Camera,
   Download,
+  CalendarCheck,
+  List,
+  Sparkles,
+  Loader2,
 } from "lucide-react";
 
 // ── Types ──
@@ -51,6 +56,7 @@ interface ScheduleEntry {
   end_time: string;
   weeks?: string;
   color?: string;
+  event_date?: string; // YYYY-MM-DD, undefined = weekly recurring
 }
 
 interface Schedule {
@@ -88,6 +94,8 @@ export default function SchedulePage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [conflicts, setConflicts] = useState<Conflict[]>([]);
+  const [adviseResults, setAdviseResults] = useState<any[]>([]);
+  const [adviseLoading, setAdviseLoading] = useState(false);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editingEntry, setEditingEntry] = useState<ScheduleEntry | null>(null);
   const [saving, setSaving] = useState(false);
@@ -95,6 +103,7 @@ export default function SchedulePage() {
   const [importDialogOpen, setImportDialogOpen] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [weekOffset, setWeekOffset] = useState(0);
+  const [viewMode, setViewMode] = useState<"week" | "list">("week");
 
   const [formData, setFormData] = useState({
     course_name: "",
@@ -104,6 +113,7 @@ export default function SchedulePage() {
     start_time: "08:00",
     end_time: "09:30",
     color: COLORS[0],
+    event_date: "",
   });
 
   const fetchSchedule = useCallback(async () => {
@@ -130,6 +140,17 @@ export default function SchedulePage() {
         setConflicts(res.conflicts || []);
       }
     } catch { /* ignore */ }
+  }, []);
+
+  const fetchAdvise = useCallback(async () => {
+    setAdviseLoading(true);
+    try {
+      const res = await api.get("/schedule/conflicts/advise") as any;
+      if (res) {
+        setAdviseResults(res.advise || []);
+      }
+    } catch { /* ignore */ }
+    setAdviseLoading(false);
   }, []);
 
   useEffect(() => {
@@ -180,7 +201,7 @@ export default function SchedulePage() {
         const formData = new FormData();
         formData.append("file", file);
         const token = localStorage.getItem("mnemo_token");
-        const resp = await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://106.53.10.184:8000/api/v1"}/schedule/import/csv`, {
+        const resp = await fetch(`${process.env.NEXT_PUBLIC_API_URL || "/api/v1"}/schedule/import/csv`, {
           method: "POST",
           headers: token ? { Authorization: `Bearer ${token}` } : {},
           body: formData,
@@ -193,6 +214,46 @@ export default function SchedulePage() {
           setImportDialogOpen(false);
         } else {
           toast.error(res.message || "Import failed");
+        }
+      } catch (err) {
+        toast.error(t("schedule.importError"));
+      } finally {
+        setImporting(false);
+      }
+    };
+    input.click();
+  };
+
+  const handleImportICS = async () => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = ".ics,.ical";
+    input.onchange = async (e) => {
+      const file = (e.target as HTMLInputElement).files?.[0];
+      if (!file) return;
+      try {
+        setImporting(true);
+        const form = new FormData();
+        form.append("file", file);
+        form.append("name", "iCal导入课表");
+        const token = localStorage.getItem("mnemo_token");
+        const resp = await fetch(`${process.env.NEXT_PUBLIC_API_URL || "/api/v1"}/schedule/import/ics`, {
+          method: "POST",
+          headers: token ? { Authorization: `Bearer ${token}` } : {},
+          body: form,
+        });
+        if (!resp.ok) {
+          const err = await resp.json().catch(() => ({ detail: "导入失败" }));
+          throw new Error(err.detail || err.message || "导入失败");
+        }
+        const res = await resp.json();
+        if (res.code === 0) {
+          toast.success(t("schedule.importSuccess", { count: res.data?.entries?.length || 0 }));
+          fetchSchedule();
+          fetchConflicts();
+          setImportDialogOpen(false);
+        } else {
+          toast.error(res.message || "导入失败");
         }
       } catch (err) {
         toast.error(t("schedule.importError"));
@@ -266,6 +327,7 @@ export default function SchedulePage() {
       start_time: time || "08:00",
       end_time: time ? `${String(parseInt(time.split(":")[0]) + 1).padStart(2, "0")}:${time.split(":")[1]}` : "09:30",
       color: COLORS[Math.floor(Math.random() * COLORS.length)],
+      event_date: "",
     });
     setDialogOpen(true);
   };
@@ -280,6 +342,7 @@ export default function SchedulePage() {
       start_time: entry.start_time,
       end_time: entry.end_time,
       color: entry.color || COLORS[0],
+      event_date: entry.event_date || "",
     });
     setDialogOpen(true);
   };
@@ -301,6 +364,7 @@ export default function SchedulePage() {
         start_time: formData.start_time,
         end_time: formData.end_time,
         color: formData.color,
+        event_date: formData.event_date || undefined,
       };
 
       if (editingEntry) {
@@ -388,10 +452,16 @@ export default function SchedulePage() {
 
   const getEntriesForSlot = (day: number, hour: number) => {
     if (!schedule) return [];
-    return schedule.entries.filter(e => {
-      if (e.day_of_week !== day) return false;
-      const startH = parseInt(e.start_time.split(":")[0]);
-      const endH = parseInt(e.end_time.split(":")[0]);
+    const dayDate = weekDates[day - 1]; // 0-indexed
+    const mm = String(dayDate.getMonth() + 1).padStart(2, "0");
+    const dd = String(dayDate.getDate()).padStart(2, "0");
+    const dayStr = `${dayDate.getFullYear()}-${mm}-${dd}`;
+    return schedule.entries.filter(entry => {
+      if (entry.day_of_week !== day) return false;
+      const evd = entry["event_date"];
+      if (evd && evd !== dayStr) return false;
+      const startH = parseInt(entry.start_time.split(":")[0]);
+      const endH = parseInt(entry.end_time.split(":")[0]);
       return hour >= startH && hour < endH;
     });
   };
@@ -460,46 +530,59 @@ export default function SchedulePage() {
           </div>
         </div>
 
-        {/* Conflicts */}
+        {/* Conflicts - compact */}
         {conflicts.length > 0 && (
-          <Card className="border-orange-200 bg-orange-50 dark:bg-orange-950/20 dark:border-orange-800">
-            <CardContent className="pt-4">
-              <div className="flex items-center gap-2 text-orange-600 dark:text-orange-400">
-                <AlertTriangle className="h-5 w-5" />
-                <span className="font-medium">{t("schedule.conflicts")} ({conflicts.length})</span>
-              </div>
-              <div className="mt-2 space-y-1 text-sm">
-                {conflicts.map((c, i) => (
-                  <div key={i} className="text-orange-700 dark:text-orange-300">
-                    {t(DAY_KEYS[c.day_of_week - 1])}: {c.course_1} ↔ {c.course_2} ({c.time_range})
-                  </div>
-                ))}
-              </div>
-            </CardContent>
-          </Card>
+          <div className="flex items-center gap-2 text-sm text-orange-600 dark:text-orange-400 px-1">
+            <AlertTriangle className="h-4 w-4" />
+            <span>{t("schedule.conflicts")} ({conflicts.length})</span>
+          </div>
         )}
 
-        {/* Week Navigation */}
+        {/* Week Navigation & View Toggle */}
         <div className="flex items-center gap-4">
-          <Button variant="ghost" size="sm" onClick={() => setWeekOffset(w => w - 1)}>
-            <ChevronLeft className="h-4 w-4" />
-          </Button>
-          <span className="font-medium text-sm">
-            {weekDates[0].toLocaleDateString("zh-CN", { month: "short", day: "numeric" })}
-            {" - "}
-            {weekDates[6].toLocaleDateString("zh-CN", { month: "short", day: "numeric" })}
-          </span>
-          <Button variant="ghost" size="sm" onClick={() => setWeekOffset(w => w + 1)}>
-            <ChevronRight className="h-4 w-4" />
-          </Button>
-          {weekOffset !== 0 && (
-            <Button variant="ghost" size="sm" onClick={() => setWeekOffset(0)}>
-              {t("schedule.thisWeek")}
+          <div className="flex items-center gap-1 bg-gray-100 dark:bg-gray-800 rounded-lg p-0.5">
+            <Button
+              variant={viewMode === "week" ? "default" : "ghost"}
+              size="sm"
+              onClick={() => setViewMode("week")}
+              className="h-7 px-2"
+            >
+              <CalendarCheck className="h-3.5 w-3.5 mr-1" />
+              {t("schedule.weekView")}
             </Button>
+            <Button
+              variant={viewMode === "list" ? "default" : "ghost"}
+              size="sm"
+              onClick={() => setViewMode("list")}
+              className="h-7 px-2"
+            >
+              <List className="h-3.5 w-3.5 mr-1" />
+              {t("schedule.listView")}
+            </Button>
+          </div>
+          {viewMode === "week" && (
+            <>
+              <Button variant="ghost" size="sm" onClick={() => setWeekOffset(w => w - 1)}>
+                <ChevronLeft className="h-4 w-4" />
+              </Button>
+              <span className="font-medium text-sm">
+                {weekDates[0].toLocaleDateString("zh-CN", { month: "short", day: "numeric" })}
+                {" - "}
+                {weekDates[6].toLocaleDateString("zh-CN", { month: "short", day: "numeric" })}
+              </span>
+              <Button variant="ghost" size="sm" onClick={() => setWeekOffset(w => w + 1)}>
+                <ChevronRight className="h-4 w-4" />
+              </Button>
+              {weekOffset !== 0 && (
+                <Button variant="ghost" size="sm" onClick={() => setWeekOffset(0)}>
+                  {t("schedule.thisWeek")}
+                </Button>
+              )}
+            </>
           )}
         </div>
 
-        {/* Schedule Grid */}
+        {/* Schedule Content */}
         {!schedule ? (
           <Card>
             <CardContent className="py-16 text-center">
@@ -512,7 +595,7 @@ export default function SchedulePage() {
               </Button>
             </CardContent>
           </Card>
-        ) : (
+        ) : viewMode === "week" ? (
           <Card className="overflow-hidden">
             <div className="overflow-x-auto">
               <div className="min-w-[800px]">
@@ -549,7 +632,14 @@ export default function SchedulePage() {
                   {/* Day columns */}
                   {DAYS.map(day => {
                     const isToday = weekOffset === 0 && day === todayDow;
-                    const dayEntries = (schedule.entries || []).filter(e => e.day_of_week === day);
+                    const dayDate = weekDates[day - 1];
+                    const dayStr = `${dayDate.getFullYear()}-${String(dayDate.getMonth() + 1).padStart(2, "0")}-${String(dayDate.getDate()).padStart(2, "0")}`;
+                    const dayEntries = (schedule.entries || []).filter(e => {
+                      if (e.day_of_week !== day) return false;
+                      const evd = e["event_date"];
+                      if (evd && evd !== dayStr) return false;
+                      return true;
+                    });
 
                     return (
                       <div key={day}
@@ -596,13 +686,102 @@ export default function SchedulePage() {
               </div>
             </div>
           </Card>
+        ) : (
+          /* List View */
+          <Card>
+            <CardContent className="p-0">
+              <div className="divide-y divide-gray-100 dark:divide-gray-800">
+                {(() => {
+                  const sorted = [...schedule.entries].sort((a, b) => {
+                    if (a["event_date"] && b["event_date"]) return a["event_date"].localeCompare(b["event_date"]);
+                    if (a["event_date"]) return -1;
+                    if (b["event_date"]) return 1;
+                    if (a.day_of_week !== b.day_of_week) return a.day_of_week - b.day_of_week;
+                    return a.start_time.localeCompare(b.start_time);
+                  });
+                  return sorted.map(entry => (
+                    <div
+                      key={entry.id}
+                      className="flex items-center gap-3 px-4 py-3 hover:bg-gray-50 dark:hover:bg-gray-800/50 cursor-pointer transition-colors"
+                      onClick={() => openEditDialog(entry)}
+                    >
+                      <div className="w-1.5 h-10 rounded-full flex-shrink-0" style={{ backgroundColor: entry.color || "#3B82F6" }} />
+                      <div className="flex-shrink-0 w-20 text-center">
+                        {entry["event_date"] ? (
+                          <div>
+                            <div className="text-xs text-muted-foreground">{entry["event_date"].slice(5)}</div>
+                            <div className="text-[10px] text-orange-400">{t(DAY_KEYS[entry.day_of_week - 1])}</div>
+                          </div>
+                        ) : (
+                          <div className="text-sm font-medium">{t(DAY_KEYS[entry.day_of_week - 1])}</div>
+                        )}
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <div className="font-medium text-sm truncate">{entry.course_name}</div>
+                        <div className="text-xs text-muted-foreground flex items-center gap-2 mt-0.5">
+                          <span>{entry.start_time}-{entry.end_time}</span>
+                          {entry.location && (
+                            <span className="flex items-center gap-0.5">
+                              <MapPin className="h-3 w-3" />{entry.location}
+                            </span>
+                          )}
+                          {entry.teacher && (
+                            <span className="flex items-center gap-0.5">
+                              <User className="h-3 w-3" />{entry.teacher}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-1 flex-shrink-0">
+                        {entry["event_date"] && (
+                          <span className="text-[10px] px-1.5 py-0.5 rounded bg-orange-100 dark:bg-orange-900/30 text-orange-600 dark:text-orange-400">
+                            {entry["event_date"]}
+                          </span>
+                        )}
+                        <Button variant="ghost" size="sm" className="h-7 w-7 p-0" onClick={(e) => { e.stopPropagation(); openEditDialog(entry); }}>
+                          <Pencil className="h-3 w-3" />
+                        </Button>
+                        <Button variant="ghost" size="sm" className="h-7 w-7 p-0 text-red-500 hover:text-red-600" onClick={(e) => { e.stopPropagation(); deleteEntry(entry.id); }}>
+                          <Trash2 className="h-3 w-3" />
+                        </Button>
+                      </div>
+                    </div>
+                  ));
+                })()}
+              </div>
+            </CardContent>
+          </Card>
         )}
 
-        {/* Course list below grid */}
-        {schedule && schedule.entries.length > 0 && (
+        {/* Course list below grid - only show in week view */}
+        {viewMode === "week" && schedule && schedule.entries.length > 0 && (
           <Card>
             <CardHeader className="pb-2">
-              <CardTitle className="text-lg">{t("schedule.courseList")} ({schedule.entries.length})</CardTitle>
+              <div className="flex items-center justify-between">
+                <CardTitle className="text-lg">{t("schedule.courseList")} ({schedule.entries.length})</CardTitle>
+                {conflicts.length > 0 && (
+                  <Button variant="ghost" size="sm" className="h-7 text-xs text-orange-500 hover:text-orange-600 hover:bg-orange-50 dark:hover:bg-orange-950/30"
+                    onClick={fetchAdvise} disabled={adviseLoading}>
+                    {adviseLoading ? (
+                      <><Loader2 className="h-3 w-3 mr-1 animate-spin" />分析中...</>
+                    ) : (
+                      <><Sparkles className="h-3 w-3 mr-1" />冲突分析</>
+                    )}
+                  </Button>
+                )}
+              </div>
+              {adviseResults.length > 0 && (
+                <div className="mt-2 space-y-1.5">
+                  {adviseResults.map((a: any, i: number) => (
+                    <div key={i} className="flex items-center gap-2 text-xs bg-green-50 dark:bg-green-950/20 rounded-md px-2 py-1.5">
+                      <CheckCircle className="h-3 w-3 text-green-500 flex-shrink-0" />
+                      <span className="text-green-700 dark:text-green-400 font-medium">{a.recommend}</span>
+                      <span className="text-muted-foreground">— {a.reason}</span>
+                      {a.skip && <span className="text-red-400">（跳过：{a.skip}）</span>}
+                    </div>
+                  ))}
+                </div>
+              )}
             </CardHeader>
             <CardContent>
               <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
@@ -616,6 +795,9 @@ export default function SchedulePage() {
                         <div className="font-medium text-sm truncate">{entry.course_name}</div>
                         <div className="text-xs text-muted-foreground flex items-center gap-2 mt-0.5">
                           <span>{t(DAY_KEYS[entry.day_of_week - 1])}</span>
+                          {entry.event_date && (
+                            <span className="text-orange-400">{entry.event_date}</span>
+                          )}
                           <span>{entry.start_time}-{entry.end_time}</span>
                           {entry.location && (
                             <span className="flex items-center gap-0.5">
@@ -700,6 +882,26 @@ export default function SchedulePage() {
                 ))}
               </div>
             </div>
+            <div className="flex items-center justify-between">
+              <div>
+                <label className="text-sm font-medium">每周循环</label>
+                <p className="text-xs text-muted-foreground">开启后每周重复，关闭则指定具体日期</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setFormData({ ...formData, event_date: formData.event_date ? "" : new Date().toISOString().slice(0, 10) })}
+                className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${!formData.event_date ? "bg-blue-500" : "bg-gray-300 dark:bg-gray-600"}`}
+              >
+                <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${!formData.event_date ? "translate-x-6" : "translate-x-1"}`} />
+              </button>
+            </div>
+            {formData.event_date && (
+              <div>
+                <label className="text-sm font-medium">指定日期</label>
+                <Input type="date" value={formData.event_date} onChange={e => setFormData({ ...formData, event_date: e.target.value })}
+                  className="mt-1" />
+              </div>
+            )}
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setDialogOpen(false)}>{t("common.cancel")}</Button>
@@ -731,6 +933,15 @@ export default function SchedulePage() {
               <div>
                 <div className="font-medium">{t("schedule.importCSV")}</div>
                 <div className="text-sm text-muted-foreground">{t("schedule.importCSVDesc")}</div>
+              </div>
+            </button>
+            <button onClick={handleImportICS} disabled={importing}
+              className="w-full flex items-center gap-3 p-4 rounded-xl border border-border/50 hover:bg-muted/50 transition-colors text-left"
+            >
+              <CalendarCheck className="h-8 w-8 text-orange-500 shrink-0" />
+              <div>
+                <div className="font-medium">{t("schedule.importICS")}</div>
+                <div className="text-sm text-muted-foreground">{t("schedule.importICSDesc")}</div>
               </div>
             </button>
             <button onClick={handleImportOCR} disabled={importing}

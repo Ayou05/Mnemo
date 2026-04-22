@@ -1,8 +1,9 @@
 import json
 import csv
 import io
+import re
 import base64
-from datetime import datetime
+from datetime import datetime, date, timedelta
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Form
@@ -53,6 +54,7 @@ def _schedule_to_dict(schedule: Schedule, entries: list[ScheduleEntry] | None = 
                 "end_time": e.end_time,
                 "weeks": e.weeks,
                 "color": e.color,
+                "event_date": e.event_date.isoformat() if e.event_date else None,
             }
             for e in entries
         ],
@@ -159,16 +161,109 @@ async def check_conflicts(
     conflicts = []
     for i, e1 in enumerate(entries):
         for e2 in entries[i + 1:]:
-            if e1.day_of_week == e2.day_of_week:
-                if e1.start_time < e2.end_time and e2.start_time < e1.end_time:
-                    conflicts.append({
-                        "course_1": e1.course_name,
-                        "course_2": e2.course_name,
-                        "day_of_week": e1.day_of_week,
-                        "time_range": f"{e1.start_time}-{e1.end_time} vs {e2.start_time}-{e2.end_time}",
-                    })
+            if e1.day_of_week != e2.day_of_week:
+                continue
+            # event_date entries only conflict if on the same date
+            if e1.event_date and e2.event_date and e1.event_date != e2.event_date:
+                continue
+            # An event_date entry and a recurring entry can conflict
+            # (the event_date entry appears on that week's day_of_week)
+            if e1.start_time < e2.end_time and e2.start_time < e1.end_time:
+                date_info = ""
+                if e1.event_date or e2.event_date:
+                    date_info = f" ({e1.event_date or e2.event_date})"
+                conflicts.append({
+                    "course_1": e1.course_name,
+                    "course_2": e2.course_name,
+                    "day_of_week": e1.day_of_week,
+                    "time_range": f"{e1.start_time}-{e1.end_time} vs {e2.start_time}-{e2.end_time}{date_info}",
+                })
 
     return ApiResponse.success(data={"conflicts": conflicts, "total_entries": len(entries)})
+
+
+@router.get("/conflicts/advise")
+async def advise_conflicts(
+    user_id: str = Depends(get_current_user_id),
+    db: AsyncSession = Depends(get_db),
+):
+    """Use LLM to recommend which class to attend when conflicts exist."""
+    import httpx
+    import logging
+    logger = logging.getLogger(__name__)
+
+    result = await db.execute(
+        select(Schedule).where(and_(Schedule.user_id == user_id, Schedule.is_active == True))
+    )
+    schedule = result.scalar_one_or_none()
+    if not schedule:
+        return ApiResponse.success(data={"advise": [], "conflicts": []})
+
+    entries = await _get_schedule_entries(db, schedule.id)
+
+    # Find conflicts
+    conflicts = []
+    for i, e1 in enumerate(entries):
+        for e2 in entries[i + 1:]:
+            if e1.day_of_week != e2.day_of_week:
+                continue
+            if e1.event_date and e2.event_date and e1.event_date != e2.event_date:
+                continue
+            if e1.start_time < e2.end_time and e2.start_time < e1.end_time:
+                date_info = ""
+                if e1.event_date or e2.event_date:
+                    date_info = f" ({e1.event_date or e2.event_date})"
+                conflicts.append({
+                    "course_1": {"name": e1.course_name, "time": f"{e1.start_time}-{e1.end_time}", "teacher": e1.teacher or "", "location": e1.location or ""},
+                    "course_2": {"name": e2.course_name, "time": f"{e2.start_time}-{e2.end_time}", "teacher": e2.teacher or "", "location": e2.location or ""},
+                    "date_info": date_info,
+                })
+
+    if not conflicts:
+        return ApiResponse.success(data={"advise": [], "conflicts": []})
+
+    # Build prompt for LLM
+    conflict_desc = "\n".join([
+        f"冲突{i+1}{c['date_info']}：\n  A: {c['course_1']['name']}（{c['course_1']['time']}，教师：{c['course_1']['teacher']}，地点：{c['course_1']['location']}）\n  B: {c['course_2']['name']}（{c['course_2']['time']}，教师：{c['course_2']['teacher']}，地点：{c['course_2']['location']}）"
+        for i, c in enumerate(conflicts)
+    ])
+
+    advise_prompt = (
+        f"你是一个学习顾问。用户有以下课程时间冲突，请根据课程内容的重要程度、实用性给出建议。\n\n"
+        f"{conflict_desc}\n\n"
+        f"对每个冲突，返回JSON数组，每个元素包含：\n"
+        f"- conflict: 冲突编号（从1开始）\n"
+        f"- recommend: 建议去上的课程名（A或B的课程名）\n"
+        f"- reason: 一句话理由（20字以内）\n"
+        f"- skip: 建议跳过的课程名\n"
+        f"只返回JSON数组，不要其他文字。"
+    )
+
+    try:
+        ocr_api_key = settings.DASHSCOPE_API_KEY
+        async with httpx.AsyncClient(timeout=30) as http_client:
+            resp = await http_client.post(
+                "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {ocr_api_key}",
+                },
+                json={
+                    "model": "qwen-turbo",
+                    "messages": [{"role": "user", "content": advise_prompt}],
+                    "temperature": 0.3,
+                },
+            )
+            result = resp.json()
+            content = result["choices"][0]["message"]["content"]
+            start = content.index("[")
+            end = content.rindex("]") + 1
+            advise = json.loads(content[start:end])
+    except Exception as e:
+        logger.error(f"Conflict advise error: {e}")
+        advise = []
+
+    return ApiResponse.success(data={"advise": advise, "conflicts": conflicts})
 
 
 @router.delete("/{schedule_id}")
@@ -194,11 +289,43 @@ async def delete_schedule(
 def _parse_time(time_str: str) -> str:
     """Normalize time string to HH:MM format."""
     time_str = time_str.strip()
+    # Handle Chinese time expressions
+    cn_map = {
+        "晚上7点": "19:00", "晚上7点半": "19:30",
+        "晚上8点": "20:00", "晚上8点半": "20:30",
+        "晚上9点": "21:00", "晚上9点半": "21:30",
+        "晚上10点": "22:00",
+        "上午7点": "07:00", "上午8点": "08:00", "上午9点": "09:00",
+        "上午10点": "10:00", "上午11点": "11:00", "上午12点": "12:00",
+        "下午1点": "13:00", "下午2点": "14:00", "下午3点": "15:00",
+        "下午4点": "16:00", "下午5点": "17:00", "下午6点": "18:00",
+    }
+    if time_str in cn_map:
+        return cn_map[time_str]
     # Handle "8:00" -> "08:00"
     if ":" in time_str:
         parts = time_str.split(":")
         return f"{int(parts[0]):02d}:{int(parts[1][:2]):02d}"
     return time_str
+
+
+def _fix_time(start_time: str, end_time: str) -> tuple[str, str]:
+    """Fix invalid times (00:00) to sensible defaults."""
+    if start_time in ("00:00", "00:01", ""):
+        start_time = "19:00"
+    if end_time in ("00:00", "00:01", "") or end_time <= start_time:
+        # Default 1h40m class
+        sh, sm = int(start_time[:2]), int(start_time[3:])
+        from datetime import timedelta
+        end_dt = datetime(2026, 1, 1, sh, sm) + timedelta(minutes=100)
+        end_time = end_dt.strftime("%H:%M")
+    return start_time, end_time
+
+
+def _day_from_date(d: date) -> int:
+    """Get day_of_week (1=Mon..7=Sun) from a date object."""
+    wd = d.isoweekday()  # Mon=1..Sun=7
+    return wd
 
 
 def _parse_day(day_str: str) -> int:
@@ -214,236 +341,8 @@ def _parse_day(day_str: str) -> int:
     return day_map.get(day_str.lower(), 1)
 
 
-@router.post("/import/json")
-async def import_json(
-    body: dict,
-    user_id: str = Depends(get_current_user_id),
-    db: AsyncSession = Depends(get_db),
-):
-    """Import schedule from JSON (supports Wakeup and generic formats)."""
-    entries_data = []
 
-    # Wakeup format: {"data": [{"courseName": ..., "room": ..., "teacher": ..., "startWeek": ..., "endWeek": ..., "classDay": ..., "classBegin": ..., "classEnd": ...}]}
-    if "data" in body and isinstance(body["data"], list):
-        for item in body["data"]:
-            # Wakeup class periods: 1-2 = 08:00-09:40, 3-4 = 10:00-11:40, etc.
-            period_map = {
-                1: "08:00", 2: "08:50", 3: "10:00", 4: "10:50",
-                5: "14:00", 6: "14:50", 7: "16:00", 8: "16:50",
-                9: "19:00", 10: "19:50", 11: "20:40", 12: "21:30",
-            }
-            begin = item.get("classBegin", 1)
-            end = item.get("classEnd", 2)
-            start_time = period_map.get(begin, "08:00")
-            end_time = period_map.get(end, "09:40")
-            if end > begin:
-                # Use the end of the last period
-                end_period_map = {
-                    1: "08:45", 2: "09:40", 3: "10:45", 4: "11:40",
-                    5: "14:45", 6: "15:40", 7: "16:45", 8: "17:40",
-                    9: "19:45", 10: "20:40", 11: "21:30", 12: "22:20",
-                }
-                end_time = end_period_map.get(end, "09:40")
-
-            weeks = list(range(item.get("startWeek", 1), item.get("endWeek", 16) + 1))
-
-            entries_data.append({
-                "course_name": item.get("courseName", item.get("name", "")),
-                "teacher": item.get("teacher", ""),
-                "location": item.get("room", ""),
-                "day_of_week": item.get("classDay", 1),
-                "start_time": start_time,
-                "end_time": end_time,
-                "weeks": weeks,
-                "color": item.get("color"),
-            })
-
-    # Generic format: {"name": "...", "entries": [...]}
-    elif "entries" in body and isinstance(body["entries"], list):
-        entries_data = body["entries"]
-
-    # Simple list format: [{"course_name": ..., "day_of_week": ..., ...}]
-    elif isinstance(body, list):
-        entries_data = body
-
-    if not entries_data:
-        return ApiResponse.error(message="无法解析课表数据")
-
-    # Deactivate old
-    old = (await db.execute(
-        select(Schedule).where(and_(Schedule.user_id == user_id, Schedule.is_active == True))
-    )).scalars().all()
-    for s in old:
-        s.is_active = False
-
-    schedule = Schedule(user_id=user_id, name=body.get("name", "导入课表"), is_active=True)
-    db.add(schedule)
-    await db.flush()
-
-    for e in entries_data:
-        entry = ScheduleEntry(
-            schedule_id=schedule.id,
-            course_name=e.get("course_name", e.get("name", "")),
-            teacher=e.get("teacher"),
-            location=e.get("location", e.get("room", "")),
-            day_of_week=_parse_day(e.get("day_of_week", 1)),
-            start_time=_parse_time(e.get("start_time", "08:00")),
-            end_time=_parse_time(e.get("end_time", "09:40")),
-            weeks=json.dumps(e.get("weeks")) if e.get("weeks") else None,
-            color=e.get("color"),
-        )
-        db.add(entry)
-
-    await db.flush()
-    entries = await _get_schedule_entries(db, schedule.id)
-    return ApiResponse.success(data=_schedule_to_dict(schedule, entries))
-
-
-@router.post("/import/csv")
-async def import_csv(
-    file: UploadFile = File(...),
-    name: str = Form("导入课表"),
-    user_id: str = Depends(get_current_user_id),
-    db: AsyncSession = Depends(get_db),
-):
-    """Import schedule from CSV file.
-    Expected columns: course_name, teacher, location, day_of_week, start_time, end_time, color
-    """
-    content = await file.read()
-    try:
-        text = content.decode("utf-8")
-    except UnicodeDecodeError:
-        text = content.decode("gbk")
-
-    reader = csv.DictReader(io.StringIO(text))
-    entries_data = []
-    for row in reader:
-        entries_data.append({
-            "course_name": row.get("course_name", row.get("课程名称", row.get("name", ""))),
-            "teacher": row.get("teacher", row.get("教师", "")),
-            "location": row.get("location", row.get("地点", row.get("room", ""))),
-            "day_of_week": _parse_day(row.get("day_of_week", row.get("星期", "1"))),
-            "start_time": _parse_time(row.get("start_time", row.get("开始时间", "08:00"))),
-            "end_time": _parse_time(row.get("end_time", row.get("结束时间", "09:40"))),
-            "color": row.get("color", ""),
-        })
-
-    if not entries_data:
-        return ApiResponse.error(message="CSV 文件为空或格式不正确")
-
-    # Deactivate old
-    old = (await db.execute(
-        select(Schedule).where(and_(Schedule.user_id == user_id, Schedule.is_active == True))
-    )).scalars().all()
-    for s in old:
-        s.is_active = False
-
-    schedule = Schedule(user_id=user_id, name=name, is_active=True)
-    db.add(schedule)
-    await db.flush()
-
-    for e in entries_data:
-        if not e["course_name"]:
-            continue
-        entry = ScheduleEntry(
-            schedule_id=schedule.id,
-            course_name=e["course_name"],
-            teacher=e.get("teacher"),
-            location=e.get("location"),
-            day_of_week=e["day_of_week"],
-            start_time=e["start_time"],
-            end_time=e["end_time"],
-            color=e.get("color"),
-        )
-        db.add(entry)
-
-    await db.flush()
-    entries = await _get_schedule_entries(db, schedule.id)
-    return ApiResponse.success(data=_schedule_to_dict(schedule, entries))
-
-
-@router.post("/import/ocr")
-async def import_ocr(
-    body: dict,
-    user_id: str = Depends(get_current_user_id),
-    db: AsyncSession = Depends(get_db),
-):
-    """Import schedule from image via AI OCR (base64 image)."""
-    if not settings.DEEPSEEK_API_KEY:
-        return ApiResponse.error(message="AI API key not configured")
-
-    image_data = body.get("image", "")
-    if not image_data:
-        return ApiResponse.error(message="请提供图片数据")
-
-    import httpx
-
-    # Use Deepseek VL for OCR
-    async with httpx.AsyncClient(timeout=90) as client:
-        resp = await client.post(
-            "https://api.deepseek.com/chat/completions",
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {settings.DEEPSEEK_API_KEY}",
-            },
-            json={
-                "model": "deepseek-chat",
-                "messages": [
-                    {
-                        "role": "system",
-                        "content": "你是一个课表识别助手。请从图片中识别课表信息，返回JSON数组格式。每个课程包含：course_name(课程名), teacher(教师), location(地点), day_of_week(星期几1-7), start_time(HH:MM), end_time(HH:MM)。只返回JSON数组，不要其他文字。",
-                    },
-                    {
-                        "role": "user",
-                        "content": image_data,
-                    },
-                ],
-                "temperature": 0.1,
-            },
-        )
-        result = resp.json()
-        content = result["choices"][0]["message"]["content"]
-
-    # Parse JSON from response
-    try:
-        start = content.index("[")
-        end = content.rindex("]") + 1
-        entries_data = json.loads(content[start:end])
-    except (ValueError, json.JSONDecodeError):
-        return ApiResponse.error(message="AI 未能识别课表，请尝试更清晰的图片")
-
-    if not entries_data:
-        return ApiResponse.error(message="未识别到课程信息")
-
-    # Deactivate old
-    old = (await db.execute(
-        select(Schedule).where(and_(Schedule.user_id == user_id, Schedule.is_active == True))
-    )).scalars().all()
-    for s in old:
-        s.is_active = False
-
-    schedule = Schedule(user_id=user_id, name=body.get("name", "OCR导入课表"), is_active=True)
-    db.add(schedule)
-    await db.flush()
-
-    for e in entries_data:
-        entry = ScheduleEntry(
-            schedule_id=schedule.id,
-            course_name=e.get("course_name", ""),
-            teacher=e.get("teacher"),
-            location=e.get("location"),
-            day_of_week=_parse_day(e.get("day_of_week", 1)),
-            start_time=_parse_time(e.get("start_time", "08:00")),
-            end_time=_parse_time(e.get("end_time", "09:40")),
-            color=e.get("color"),
-        )
-        db.add(entry)
-
-    await db.flush()
-    entries = await _get_schedule_entries(db, schedule.id)
-    return ApiResponse.success(data=_schedule_to_dict(schedule, entries))
-
-
+# Import routes extracted to schedule_import.py
 @router.get("/export/json")
 async def export_json(
     user_id: str = Depends(get_current_user_id),

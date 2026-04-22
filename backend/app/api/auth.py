@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
+from pydantic import BaseModel
+from sqlalchemy import select, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
@@ -9,6 +10,11 @@ from app.models.models import User
 from app.schemas.schemas import UserCreate, UserLogin, UserOut, Token
 
 router = APIRouter()
+
+
+class SettingsUpdate(BaseModel):
+    """Partial update for user settings (JSON blob)."""
+    settings: dict
 
 
 @router.post("/register", status_code=status.HTTP_201_CREATED)
@@ -41,7 +47,7 @@ async def register(body: UserCreate, db: AsyncSession = Depends(get_db)):
 
 @router.post("/login")
 async def login(body: UserLogin, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(User).where(User.username == body.username))
+    result = await db.execute(select(User).where(or_(User.username == body.username, User.email == body.username)))
     user = result.scalar_one_or_none()
 
     if not user or not verify_password(body.password, user.hashed_password):
@@ -65,4 +71,42 @@ async def get_me(token: str = Depends(oauth2_scheme), db: AsyncSession = Depends
     user = result.scalar_one_or_none()
     if not user:
         raise HTTPException(status_code=404, detail="用户不存在")
-    return ApiResponse.success(data=UserOut.model_validate(user).model_dump())
+    data = UserOut.model_validate(user).model_dump()
+    # Attach settings
+    data["settings"] = user.settings or {}
+    return ApiResponse.success(data=data)
+
+
+@router.get("/settings")
+async def get_settings(token: str = Depends(oauth2_scheme), db: AsyncSession = Depends(get_db)):
+    """Get user settings (JSON blob stored on server, syncs across devices)."""
+    payload = decode_access_token(token)
+    user_id = payload.get("sub")
+    result = await db.execute(select(User).where(User.id == user_id))
+    user = result.scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=404, detail="用户不存在")
+    return ApiResponse.success(data=user.settings or {})
+
+
+@router.put("/settings")
+async def update_settings(
+    body: SettingsUpdate,
+    token: str = Depends(oauth2_scheme),
+    db: AsyncSession = Depends(get_db),
+):
+    """Update user settings (merge into existing JSON blob)."""
+    from sqlalchemy.orm.attributes import flag_modified
+    payload = decode_access_token(token)
+    user_id = payload.get("sub")
+    result = await db.execute(select(User).where(User.id == user_id))
+    user = result.scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=404, detail="用户不存在")
+    # Merge
+    existing = user.settings or {}
+    existing.update(body.settings)
+    user.settings = existing
+    flag_modified(user, "settings")
+    await db.commit()
+    return ApiResponse.success(data=existing)

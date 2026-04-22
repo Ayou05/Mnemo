@@ -36,6 +36,7 @@ import {
   Headphones,
   ChevronLeft,
   ChevronRight,
+  ChevronDown,
   X,
   Check,
   Star,
@@ -51,136 +52,19 @@ import {
   Loader2,
   Play,
   AlertTriangle,
+  WandSparkles,
 } from "lucide-react";
 
-// ── Types ──
 
-interface MemoryCard {
-  id: string;
-  card_set_id?: string;
-  source_text: string;
-  target_text: string;
-  source_lang: string;
-  target_lang: string;
-  domain: string;
-  difficulty: number;
-  card_type: string;
-  next_review?: string;
-  review_count: number;
-  wrong_count?: number;
-  ease_factor: number;
-  interval_days: number;
-  is_mastered: boolean;
-  sort_order: number;
-  created_at: string;
-  updated_at?: string;
-}
-
-interface CardSet {
-  id: string;
-  name: string;
-  description?: string;
-  source_type: string;
-  card_count: number;
-  is_pinned: boolean;
-  created_at: string;
-}
-
-interface MemoryStats {
-  total: number;
-  mastered: number;
-  due_today: number;
-  total_reviews: number;
-  avg_ease: number;
-  mastery_rate: number;
-  domains: Record<string, number>;
-  difficulties: Record<string, number>;
-  weak_domains?: Array<{ domain: string; wrong_total: number }>;
-  wrong_reasons?: Array<{ reason: string; label: string; count: number }>;
-  wrong_reason_trend?: Array<{ day: string; reason: string; label: string; count: number }>;
-  unreleased?: number;
-}
-
-interface TrainingSessionSummary {
-  hours: number;
-  total: number;
-  correct_rate: number;
-  avg_think_time_ms: number;
-  avg_verify_time_ms: number;
-}
-
-interface GroupCardProgress {
-  streak: number;
-  progress: number;
-  attempts: number;
-  passed: boolean;
-}
-
-interface GamificationState {
-  globalStreak: number;
-  bestStreak: number;
-  totalScore: number;
-  sessionScore: number;
-  lastScoreDelta: number;
-  streakMilestone: string | null; // "x3" | "x5" | "x10" | null — triggers animation
-}
-
-const GROUP_SIZE_OPTIONS = [5, 10, 15, 20];
-const PASS_STREAK_TARGET = 3;
-
-function getComboMultiplier(streak: number): number {
-  if (streak >= 20) return 2.5;
-  if (streak >= 10) return 2.0;
-  if (streak >= 5) return 1.5;
-  return 1.0;
-}
-
-function getStreakMilestone(streak: number): string | null {
-  if (streak === 3) return "x3";
-  if (streak === 5) return "x5";
-  if (streak === 10) return "x10";
-  if (streak === 15) return "x15";
-  if (streak === 20) return "x20";
-  if (streak > 0 && streak % 10 === 0) return `x${streak}`;
-  return null;
-}
-
-function getReviewCountdown(card: MemoryCard, nowMs: number) {
-  if (!card.next_review || card.review_count === 0) {
-    return { label: "初见", tone: "new" as const, due: false };
-  }
-
-  const diffMs = new Date(card.next_review).getTime() - nowMs;
-  if (!Number.isFinite(diffMs) || diffMs <= 0) {
-    return { label: "现在复习", tone: "due" as const, due: true };
-  }
-
-  const totalMinutes = Math.ceil(diffMs / 60000);
-  const days = Math.floor(totalMinutes / 1440);
-  const hours = Math.floor((totalMinutes % 1440) / 60);
-  const minutes = totalMinutes % 60;
-  const label = days > 0
-    ? `${days}d ${String(hours).padStart(2, "0")}h`
-    : `${String(hours).padStart(2, "0")}h ${String(minutes).padStart(2, "0")}m`;
-
-  return { label, tone: days > 0 ? "later" as const : "soon" as const, due: false };
-}
-
-function CountdownBadge({ card, nowMs }: { card: MemoryCard; nowMs: number }) {
-  const countdown = getReviewCountdown(card, nowMs);
-  const toneClass = {
-    new: "border-slate-500/30 bg-slate-500/10 text-slate-300",
-    due: "border-emerald-400/40 bg-emerald-500/15 text-emerald-300",
-    soon: "border-amber-400/40 bg-amber-500/15 text-amber-300",
-    later: "border-indigo-400/30 bg-indigo-500/10 text-indigo-300",
-  }[countdown.tone];
-
-  return (
-    <span className={`inline-flex min-w-[86px] justify-center rounded-md border px-2 py-1 font-mono text-[11px] tabular-nums shadow-inner ${toneClass}`}>
-      {countdown.label}
-    </span>
-  );
-}
+import {
+  MemoryCard, CardSet, MemoryStats, TrainingSessionSummary,
+  GroupCardProgress, GamificationState,
+  GROUP_SIZE_OPTIONS, PASS_STREAK_TARGET,
+  WRONG_REASON_LABELS_MAP, WRONG_REASON_COLORS,
+  MODE_LABELS, MODE_DESCRIPTIONS, MODE_ICONS,
+  getComboMultiplier, getStreakMilestone, getReviewCountdown,
+  CountdownBadge,
+} from "@/lib/memory-types";
 
 // ── Component ──
 
@@ -250,10 +134,18 @@ export default function MemoryPage() {
   const [flipCount, setFlipCount] = useState(0);
   const [reviewStepLocked, setReviewStepLocked] = useState(false);
   const [lastCASRResult, setLastCASRResult] = useState<any>(null);
+  const [aiDiagnosis, setAiDiagnosis] = useState<any>(null);
+  const [diagnosing, setDiagnosing] = useState(false);
+  const [modeRecommendation, setModeRecommendation] = useState<any>(null);
   const [reviewSessionStats, setReviewSessionStats] = useState({ forgot: 0, fuzzy: 0, remembered: 0 });
+  const [sessionInsight, setSessionInsight] = useState<{ summary: string; weak_points: string[]; suggestions: string[]; encouragement: string } | null>(null);
+  const [insightLoading, setInsightLoading] = useState(false);
   const [reviewMode, setReviewMode] = useState<"standard" | "write_en_to_zh" | "write_zh_to_en" | "cloze" | "paragraph">("write_en_to_zh");
   const [answerText, setAnswerText] = useState("");
   const [wrongbook, setWrongbook] = useState<any[]>([]);
+  const [wrongbookReasonDist, setWrongbookReasonDist] = useState<Record<string, number>>({});
+  const [wrongbookFilter, setWrongbookFilter] = useState<string>("all");
+  const [expandedWrongCard, setExpandedWrongCard] = useState<string | null>(null);
   const [reviewSource, setReviewSource] = useState<"general" | "wrongbook">("general");
   const [reviewDeckId, setReviewDeckId] = useState("all");
   const [reviewScope, setReviewScope] = useState<"due" | "recent" | "random" | "wrongbook">("due");
@@ -280,6 +172,14 @@ export default function MemoryPage() {
     streakMilestone: null,
   });
   const streakMilestoneTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const reviewQueueRef = useRef<any[]>([]);
+  const reviewSessionStatsRef = useRef({ forgot: 0, fuzzy: 0, remembered: 0 });
+  const gameRef = useRef({ sessionScore: 0 });
+
+  // Keep refs in sync with state (for use in async callbacks)
+  useEffect(() => { reviewQueueRef.current = reviewQueue; }, [reviewQueue]);
+  useEffect(() => { reviewSessionStatsRef.current = reviewSessionStats; }, [reviewSessionStats]);
+  useEffect(() => { gameRef.current = { sessionScore: game.sessionScore }; }, [game.sessionScore]);
   const [sessionComplete, setSessionComplete] = useState(false);
 
   // Card detail panel
@@ -351,18 +251,49 @@ export default function MemoryPage() {
     }
   }, []);
 
+  const fetchSessionInsight = useCallback(async () => {
+    setInsightLoading(true);
+    setSessionInsight(null);
+    try {
+      const cardIds = reviewQueueRef.current.map(c => c.id);
+      const res = await api.post("/memory/training/session-insight", {
+        remembered: reviewSessionStatsRef.current.remembered,
+        fuzzy: reviewSessionStatsRef.current.fuzzy,
+        forgot: reviewSessionStatsRef.current.forgot,
+        score: gameRef.current.sessionScore,
+        card_ids: cardIds,
+      }) as any;
+      if (res) setSessionInsight(res);
+    } catch {
+      // Silent fail — insight is optional
+    } finally {
+      setInsightLoading(false);
+    }
+  }, []);
+
   const fetchWrongbook = useCallback(async () => {
     try {
       const res = await api.get("/memory/wrongbook") as any;
       setWrongbook(res?.items || []);
+      setWrongbookReasonDist(res?.reason_distribution || {});
     } catch {
       setWrongbook([]);
+      setWrongbookReasonDist({});
+    }
+  }, []);
+
+  const fetchModeRecommendation = useCallback(async () => {
+    try {
+      const res = await api.get("/memory/recommend-mode") as any;
+      setModeRecommendation(res);
+    } catch {
+      setModeRecommendation(null);
     }
   }, []);
 
   useEffect(() => {
-    Promise.all([fetchCardSets(), fetchCards(), fetchStats(), fetchWrongbook(), fetchSessionSummary()]).finally(() => setLoading(false));
-  }, [fetchCardSets, fetchCards, fetchStats, fetchWrongbook, fetchSessionSummary]);
+    Promise.all([fetchCardSets(), fetchCards(), fetchStats(), fetchWrongbook(), fetchSessionSummary(), fetchModeRecommendation()]).finally(() => setLoading(false));
+  }, [fetchCardSets, fetchCards, fetchStats, fetchWrongbook, fetchSessionSummary, fetchModeRecommendation]);
 
   useEffect(() => {
     hydrateSettings();
@@ -654,10 +585,49 @@ export default function MemoryPage() {
         pool = shuffleCards(pool);
       }
 
-      const modes: Array<"write_en_to_zh" | "write_zh_to_en" | "cloze" | "paragraph"> = flow === "fragment"
-        ? ["write_en_to_zh", "write_zh_to_en", "cloze", "paragraph"]
-        : [reviewMode === "standard" ? "write_en_to_zh" : reviewMode];
-      const group = pool.slice(0, groupSize).map((card, index) => buildReviewItem(card, modes[index % modes.length]));
+      // Smart mode selection: pick mode based on card state (confidence + error pattern)
+      const group = pool.slice(0, groupSize).map((card) => {
+        const conf = card.confidence || 0;
+        const wrongReason = (card as any).last_wrong_reason || "";
+        const wrongCount = card.wrong_count || 0;
+        let mode: "write_en_to_zh" | "write_zh_to_en" | "cloze" | "paragraph";
+
+        if (flow === "fragment") {
+          const modes: Array<"write_en_to_zh" | "write_zh_to_en" | "cloze" | "paragraph"> = ["write_en_to_zh", "write_zh_to_en", "cloze", "paragraph"];
+          mode = modes[Math.floor(Math.random() * modes.length)];
+        } else if (flow === "first") {
+          // New cards: use text features to pick mode
+          const srcLen = card.source_text?.length || 0;
+          const wordCount = (card.source_text || "").split(/\s+/).filter(Boolean).length;
+          if (wordCount <= 3 && srcLen <= 30) {
+            mode = "write_en_to_zh"; // Short terms: basic recall
+          } else if (wordCount <= 8) {
+            mode = "cloze"; // Medium phrases: cloze for targeted recall
+          } else {
+            mode = "write_en_to_zh"; // Long sentences: start with basic
+          }
+        } else {
+          // Review: error-pattern-aware + confidence-based
+          if (wrongReason === "spelling" && wrongCount >= 2) {
+            mode = "cloze";
+          } else if (wrongReason === "word_order" && wrongCount >= 2) {
+            mode = "paragraph";
+          } else if ((wrongReason === "forgot" || wrongReason === "omission") && wrongCount >= 3) {
+            mode = "write_en_to_zh";
+          } else if (wrongReason === "grammar" && wrongCount >= 2) {
+            mode = "paragraph";
+          } else if (conf < 30) {
+            mode = "write_en_to_zh";
+          } else if (conf < 60) {
+            mode = "write_zh_to_en";
+          } else if (conf < 80) {
+            mode = "cloze";
+          } else {
+            mode = "paragraph";
+          }
+        }
+        return buildReviewItem(card, mode);
+      });
       if (group.length === 0) {
         toast.info(flow === "first" ? "暂无初见卡片" : "当前范围暂无可练内容");
         return;
@@ -728,6 +698,26 @@ export default function MemoryPage() {
     }
   };
 
+  const requestAiDiagnosis = async () => {
+    if (!lastCASRResult || !reviewQueue[reviewIndex]) return;
+    const card = reviewQueue[reviewIndex];
+    setDiagnosing(true);
+    try {
+      const res = await api.post("/memory/diagnose", {
+        source_text: card.source_text || "",
+        expected: lastCASRResult.expected_answer || "",
+        actual: lastCASRResult.answer || "",
+        mode: lastCASRResult.mode || "write_en_to_zh",
+        score: lastCASRResult.score || 0,
+      }) as any;
+      setAiDiagnosis(res);
+    } catch {
+      toast.error("AI 分析失败，请重试");
+    } finally {
+      setDiagnosing(false);
+    }
+  };
+
   const continueToNextCard = () => {
     setAwaitingManualAdvance(false);
     const p = pendingAdvanceRef.current;
@@ -746,6 +736,7 @@ export default function MemoryPage() {
     setFlipCount(0);
     setReviewStepLocked(false);
     setLastCASRResult(null);
+    setAiDiagnosis(null);
     setAnswerText("");
   };
 
@@ -813,6 +804,10 @@ export default function MemoryPage() {
     setReviewQueue(queueSynced);
 
     setLastCASRResult(res);
+    // Auto-populate AI diagnosis from evaluate response
+    if (res?.ai_diagnosis) {
+      setAiDiagnosis(res.ai_diagnosis);
+    }
     setGroupProgress(updatedProgress);
     setReviewSessionStats(prev => ({ ...prev, [result]: prev[result] + 1 }));
 
@@ -867,6 +862,8 @@ export default function MemoryPage() {
       fetchStats();
       fetchWrongbook();
       fetchSessionSummary();
+      // Fetch AI session insight
+      fetchSessionInsight();
     } else {
       const nextMode = (remainingQueue[nextIndex]?.mode || reviewMode) as
         "standard" | "write_en_to_zh" | "write_zh_to_en" | "cloze" | "paragraph";
@@ -1348,7 +1345,7 @@ export default function MemoryPage() {
                     },
                     {
                       title: "复习",
-                      desc: "按遗忘周期、近期学习、错题或随机范围抽取已学内容，重新加固记忆。",
+                      desc: modeRecommendation ? `${modeRecommendation.mode_label} — ${modeRecommendation.reason}` : "按遗忘周期、近期学习、错题或随机范围抽取已学内容，重新加固记忆。",
                       meta: `${stats?.due_today || 0} 张到期 · ${wrongbook.length} 错题`,
                       action: () => startSmartSession("review"),
                     },
@@ -1382,44 +1379,163 @@ export default function MemoryPage() {
 
         {/* ═══ Wrongbook Tab ═══ */}
         {activeTab === "wrongbook" && (
-          <Card>
-            <CardHeader className="flex flex-row items-center justify-between">
-              <CardTitle>{t("memory.wrongbookTitle")}</CardTitle>
-              <Button variant="outline" size="sm" onClick={fetchWrongbook}>
-                <RefreshCw className="h-4 w-4 mr-1" />
-                {t("common.retry")}
-              </Button>
-            </CardHeader>
-            <CardContent>
-              {wrongbook.length === 0 ? (
-                <EmptyState title={t("memory.wrongbookEmpty")} description={t("memory.wrongbookEmptyDesc")} />
-              ) : (
-                <div className="space-y-2">
-                  <Button onClick={startWrongbookReview} className="mb-2">{t("memory.reviewWrongbook")}</Button>
-                  {wrongbook.map((card) => (
-                    <div key={card.id} className="flex items-center gap-3 rounded-lg border px-3 py-2">
-                      <span className="text-xs text-red-500 font-semibold">x{card.wrong_count || 0}</span>
-                      <div className="flex-1 min-w-0">
-                        <p className="truncate text-sm">{card.source_text}</p>
-                        <p className="truncate text-xs text-muted-foreground">{card.target_text}</p>
-                      </div>
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={async () => {
-                          await api.post(`/memory/wrongbook/${card.id}/clear`);
-                          fetchWrongbook();
-                        }}
+          <div className="space-y-4">
+            {/* Error pattern analysis */}
+            {Object.keys(wrongbookReasonDist).length > 0 && (
+              <Card>
+                <CardHeader><CardTitle className="text-base">错因分布</CardTitle></CardHeader>
+                <CardContent>
+                  {/* Proportion bar */}
+                  <div className="mb-3 flex h-3 overflow-hidden rounded-full bg-muted">
+                    {Object.entries(wrongbookReasonDist).map(([reason, count]) => {
+                      const total = Object.values(wrongbookReasonDist).reduce((a: number, b: number) => a + b, 0);
+                      const pct = (count / total) * 100;
+                      const colorMap: Record<string, string> = {
+                        spelling: "bg-orange-400",
+                        word_order: "bg-blue-400",
+                        omission: "bg-amber-400",
+                        confusion: "bg-purple-400",
+                        grammar: "bg-cyan-400",
+                        forgot: "bg-red-400",
+                        mismatch: "bg-red-400",
+                        partial_match: "bg-yellow-400",
+                        missing_content: "bg-rose-400",
+                      };
+                      return (
+                        <div
+                          key={reason}
+                          className={`${colorMap[reason] || "bg-gray-400"} transition-all duration-300`}
+                          style={{ width: `${pct}%` }}
+                          title={`${WRONG_REASON_LABELS_MAP[reason] || reason}: ${count} (${pct.toFixed(1)}%)`}
+                        />
+                      );
+                    })}
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      onClick={() => setWrongbookFilter("all")}
+                      className={`rounded-full px-3 py-1 text-xs font-medium transition-colors ${
+                        wrongbookFilter === "all"
+                          ? "bg-primary text-primary-foreground"
+                          : "bg-muted text-muted-foreground hover:bg-muted/80"
+                      }`}
+                    >
+                      全部 ({wrongbook.length})
+                    </button>
+                    {Object.entries(wrongbookReasonDist).map(([reason, count]) => (
+                      <button
+                        key={reason}
+                        onClick={() => setWrongbookFilter(reason)}
+                        className={`rounded-full px-3 py-1 text-xs font-medium transition-colors ${
+                          wrongbookFilter === reason
+                            ? "bg-primary text-primary-foreground"
+                            : "bg-muted text-muted-foreground hover:bg-muted/80"
+                        }`}
                       >
-                        {t("memory.removeFromWrongbook")}
-                      </Button>
-                    </div>
-                  ))}
+                        {WRONG_REASON_LABELS_MAP[reason] || reason} ({count})
+                      </button>
+                    ))}
+                  </div>
+                </CardContent>
+              </Card>
+            )}
+
+            <Card>
+              <CardHeader className="flex flex-row items-center justify-between">
+                <CardTitle>{t("memory.wrongbookTitle")}</CardTitle>
+                <div className="flex items-center gap-2">
+                  <Button variant="outline" size="sm" onClick={fetchWrongbook}>
+                    <RefreshCw className="h-4 w-4 mr-1" />
+                    {t("common.retry")}
+                  </Button>
                 </div>
-              )}
-            </CardContent>
-          </Card>
+              </CardHeader>
+              <CardContent>
+                {wrongbook.length === 0 ? (
+                  <EmptyState title={t("memory.wrongbookEmpty")} description={t("memory.wrongbookEmptyDesc")} />
+                ) : (
+                  <div className="space-y-2">
+                    <Button onClick={startWrongbookReview} className="mb-2">{t("memory.reviewWrongbook")}</Button>
+                    {wrongbook
+                      .filter((card) => wrongbookFilter === "all" || card.last_wrong_reason === wrongbookFilter)
+                      .map((card) => (
+                      <div key={card.id} className="rounded-lg border">
+                        <div
+                          className="flex items-center gap-3 px-3 py-2 cursor-pointer hover:bg-muted/50 transition-colors"
+                          onClick={() => setExpandedWrongCard(expandedWrongCard === card.id ? null : card.id)}
+                        >
+                          <span className="text-xs text-red-500 font-semibold shrink-0">x{card.wrong_count || 0}</span>
+                          {card.last_wrong_reason && (
+                            <span className={`inline-flex items-center gap-1 rounded-full px-1.5 py-0.5 text-[10px] font-medium shrink-0 ${WRONG_REASON_COLORS[card.last_wrong_reason] || "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400"}`}>
+                              {WRONG_REASON_LABELS_MAP[card.last_wrong_reason] || card.last_wrong_reason}
+                            </span>
+                          )}
+                          <div className="flex-1 min-w-0">
+                            <p className="truncate text-sm">{card.source_text}</p>
+                            <p className="truncate text-xs text-muted-foreground">{card.target_text}</p>
+                          </div>
+                          <div className="flex items-center gap-1 shrink-0">
+                            {card.confidence != null && (
+                              <span className={`text-[11px] font-medium ${card.confidence >= 70 ? "text-green-600" : card.confidence >= 40 ? "text-yellow-600" : "text-red-600"}`}>
+                                {Math.round(card.confidence)}%
+                              </span>
+                            )}
+                            <ChevronDown className={`h-4 w-4 text-muted-foreground transition-transform ${expandedWrongCard === card.id ? "rotate-180" : ""}`} />
+                          </div>
+                        </div>
+                        {expandedWrongCard === card.id && (
+                          <div className="border-t px-3 py-2 space-y-2 bg-muted/20">
+                            {/* Wrong history */}
+                            {Array.isArray(card.wrong_history) && card.wrong_history.length > 0 ? (
+                              <div className="space-y-1.5">
+                                <p className="text-[11px] font-medium text-muted-foreground">最近错误记录</p>
+                                {card.wrong_history.map((h: any, idx: number) => (
+                                  <div key={idx} className="flex items-center gap-2 text-xs">
+                                    <span className={`shrink-0 ${h.result === "forgot" ? "text-red-500" : "text-yellow-500"}`}>
+                                      {h.result === "forgot" ? "✗" : "~"}
+                                    </span>
+                                    {h.wrong_reason && (
+                                      <span className={`inline-flex items-center rounded-full px-1.5 py-0.5 text-[10px] font-medium ${WRONG_REASON_COLORS[h.wrong_reason] || "bg-gray-100 text-gray-600"}`}>
+                                        {WRONG_REASON_LABELS_MAP[h.wrong_reason] || h.wrong_reason}
+                                      </span>
+                                    )}
+                                    <span className="text-muted-foreground ml-auto">
+                                      {h.confidence_before}% → {h.confidence_after}%
+                                    </span>
+                                  </div>
+                                ))}
+                              </div>
+                            ) : (
+                              <p className="text-xs text-muted-foreground">暂无详细错误记录</p>
+                            )}
+                            <div className="flex justify-end pt-1">
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                className="text-xs text-muted-foreground"
+                                onClick={async (e) => {
+                                  e.stopPropagation();
+                                  await api.post(`/memory/wrongbook/${card.id}/clear`);
+                                  fetchWrongbook();
+                                }}
+                              >
+                                {t("memory.removeFromWrongbook")}
+                              </Button>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                    {wrongbook.filter((card) => wrongbookFilter === "all" || card.last_wrong_reason === wrongbookFilter).length === 0 && (
+                      <p className="text-center text-sm text-muted-foreground py-4">该分类下暂无错题</p>
+                    )}
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          </div>
         )}
+
 
         {/* ═══ Session Complete Summary ═══ */}
         {activeTab === "review" && sessionComplete && reviewing && (
@@ -1502,6 +1618,87 @@ export default function MemoryPage() {
                   </div>
                 </div>
 
+                {/* Mode recommendation */}
+                {modeRecommendation && (
+                  <div className="rounded-lg border border-primary/20 bg-gradient-to-r from-primary/5 to-violet-500/5 p-3">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2 text-sm font-medium text-primary">
+                        <Sparkles className="h-4 w-4" />
+                        推荐下一步：{MODE_LABELS[modeRecommendation.recommended_mode] || modeRecommendation.mode_label}
+                      </div>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="h-7 text-xs"
+                        onClick={() => {
+                          setSessionComplete(false);
+                          setReviewing(false);
+                          setTimeout(() => startSmartSession("review"), 100);
+                        }}
+                      >
+                        立即开始
+                      </Button>
+                    </div>
+                    <p className="text-xs text-muted-foreground mt-1.5">{modeRecommendation.reason}</p>
+                    {modeRecommendation.signals?.top_error && (
+                      <div className="flex items-center gap-1.5 mt-1.5">
+                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-orange-100 dark:bg-orange-900/30 text-orange-700 dark:text-orange-300">
+                          {WRONG_REASON_LABELS_MAP[modeRecommendation.signals.top_error] || modeRecommendation.signals.top_error}
+                        </span>
+                        <span className="text-[10px] text-muted-foreground">
+                          近期 {modeRecommendation.signals.top_error_count} 次
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* AI Session Insight */}
+                {(insightLoading || sessionInsight) && (
+                  <div className="rounded-lg border bg-gradient-to-br from-violet-500/5 to-indigo-500/5 p-4 space-y-3">
+                    <div className="flex items-center gap-2">
+                      <WandSparkles className="h-4 w-4 text-violet-500" />
+                      <span className="text-sm font-medium">AI 学习洞察</span>
+                    </div>
+                    {insightLoading ? (
+                      <div className="space-y-2">
+                        <div className="h-4 bg-muted rounded w-3/4 animate-pulse" />
+                        <div className="h-3 bg-muted rounded w-1/2 animate-pulse" />
+                        <div className="h-3 bg-muted rounded w-2/3 animate-pulse" />
+                      </div>
+                    ) : sessionInsight ? (
+                      <>
+                        {sessionInsight.summary && (
+                          <p className="text-sm text-foreground">{sessionInsight.summary}</p>
+                        )}
+                        {sessionInsight.weak_points?.length > 0 && (
+                          <div className="space-y-1">
+                            <p className="text-xs font-medium text-orange-600 dark:text-orange-400">薄弱环节</p>
+                            {sessionInsight.weak_points.map((wp, i) => (
+                              <p key={i} className="text-xs text-muted-foreground flex items-start gap-1.5">
+                                <span className="text-orange-500 mt-0.5">•</span>{wp}
+                              </p>
+                            ))}
+                          </div>
+                        )}
+                        {sessionInsight.suggestions?.length > 0 && (
+                          <div className="space-y-1">
+                            <p className="text-xs font-medium text-blue-600 dark:text-blue-400">学习建议</p>
+                            {sessionInsight.suggestions.map((s, i) => (
+                              <p key={i} className="text-xs text-muted-foreground flex items-start gap-1.5">
+                                <span className="text-blue-500 mt-0.5">→</span>{s}
+                              </p>
+                            ))}
+                          </div>
+                        )}
+                        {sessionInsight.encouragement && (
+                          <p className="text-xs text-violet-600 dark:text-violet-400 italic mt-1">{sessionInsight.encouragement}</p>
+                        )}
+                      </>
+                    ) : null}
+                  </div>
+                )}
+
                 {/* Actions */}
                 <div className="flex gap-3 pt-2">
                   <Button
@@ -1547,7 +1744,14 @@ export default function MemoryPage() {
           return (
           <div className="max-w-lg mx-auto space-y-4">
             <div className="flex items-center justify-between text-sm text-gray-500">
+            <div className="flex items-center gap-2">
+              {currentMode !== "standard" && (
+                <span className="inline-flex items-center gap-1 rounded-full bg-primary/10 px-2 py-0.5 text-[11px] font-medium text-primary">
+                  {MODE_ICONS[currentMode] || "📝"}{MODE_LABELS[currentMode] || currentMode}
+                </span>
+              )}
               <span>本组通过 {groupPassed} / {groupTotal} · 剩余 {reviewQueue.length}</span>
+            </div>
               <div className="flex items-center gap-3">
                 <span className="text-xs">
                   {reviewSessionStats.forgot > 0 && <span className="text-red-500">✗{reviewSessionStats.forgot}</span>}
@@ -1791,11 +1995,49 @@ export default function MemoryPage() {
                         Score {lastCASRResult.score}/100 · {lastCASRResult.verdict}
                       </p>
                     )}
+                    {lastCASRResult.wrong_reason && (
+                      <div className="flex items-center gap-1.5">
+                        <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium ${WRONG_REASON_COLORS[lastCASRResult.wrong_reason] || "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400"}`}>
+                          {lastCASRResult.wrong_reason_icon}{WRONG_REASON_LABELS_MAP[lastCASRResult.wrong_reason] || lastCASRResult.wrong_reason}
+                        </span>
+                      </div>
+                    )}
                     {Array.isArray(lastCASRResult.feedback) && lastCASRResult.feedback.length > 0 && (
                       <div className="rounded-md border bg-muted/30 px-2 py-1.5 text-xs text-muted-foreground">
                         {lastCASRResult.feedback.map((tip: string, idx: number) => (
                           <p key={`${tip}-${idx}`}>- {tip}</p>
                         ))}
+                      </div>
+                    )}
+                    {lastCASRResult.result !== "remembered" && !aiDiagnosis && (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="text-xs text-primary hover:text-primary/80"
+                        onClick={requestAiDiagnosis}
+                        disabled={diagnosing}
+                      >
+                        <Sparkles className="h-3 w-3 mr-1" />
+                        {diagnosing ? "AI 分析中..." : "AI 详细分析"}
+                      </Button>
+                    )}
+                    {aiDiagnosis && (
+                      <div className="rounded-lg border border-primary/20 bg-primary/5 px-3 py-2 text-xs space-y-1.5 animate-in fade-in duration-300">
+                        <div className="flex items-center gap-1.5 font-medium text-primary">
+                          <Sparkles className="h-3 w-3" />
+                          AI 诊断：{aiDiagnosis.error_type}
+                        </div>
+                        <p className="text-muted-foreground">{aiDiagnosis.error_detail}</p>
+                        {Array.isArray(aiDiagnosis.suggestions) && aiDiagnosis.suggestions.length > 0 && (
+                          <ul className="space-y-0.5 text-muted-foreground">
+                            {aiDiagnosis.suggestions.map((s: string, i: number) => (
+                              <li key={i}>💡 {s}</li>
+                            ))}
+                          </ul>
+                        )}
+                        {aiDiagnosis.encouragement && (
+                          <p className="text-primary/70 italic">{aiDiagnosis.encouragement}</p>
+                        )}
                       </div>
                     )}
                     {algoAdjusted && (
@@ -1889,21 +2131,33 @@ export default function MemoryPage() {
               <CardContent>
                 <div className="flex items-end gap-2 h-32">
                   {[1,2,3,4,5].map((d) => {
-                    const count = stats.difficulties?.[String(d)] || 0;
-                    const maxCount = Math.max(...Object.values(stats.difficulties || { "1": 1 }), 1);
+                    const effCount = stats.effective_difficulties?.[String(d)] || 0;
+                    const presetCount = stats.difficulties?.[String(d)] || 0;
+                    const dataSource = stats.effective_difficulties ? effCount : presetCount;
+                    const allValues = stats.effective_difficulties
+                      ? Object.values(stats.effective_difficulties)
+                      : Object.values(stats.difficulties || { "1": 1 });
+                    const maxCount = Math.max(...allValues, 1);
                     return (
                       <div key={d} className="flex-1 flex flex-col items-center gap-1">
-                        <span className="text-xs text-gray-500">{count}</span>
-                        <div className="w-full bg-gray-200 dark:bg-gray-700 rounded-t" style={{ height: "100px" }}>
-                          <div className={`w-full rounded-t ${
-                            d <= 2 ? "bg-green-500" : d <= 3 ? "bg-yellow-500" : d <= 4 ? "bg-orange-500" : "bg-red-500"
-                          }`} style={{ height: `${(count / maxCount) * 100}%`, marginTop: `${100 - (count / maxCount) * 100}%` }} />
+                        <span className="text-xs text-gray-500">{dataSource}</span>
+                        <div className="w-full bg-gray-200 dark:bg-gray-700 rounded-t relative" style={{ height: "100px" }}>
+                          <div className={`absolute bottom-0 left-0 right-0 rounded-t transition-all duration-500 ${
+                            d === 1 ? "bg-green-400 dark:bg-green-500" :
+                            d === 2 ? "bg-emerald-400 dark:bg-emerald-500" :
+                            d === 3 ? "bg-yellow-400 dark:bg-yellow-500" :
+                            d === 4 ? "bg-orange-400 dark:bg-orange-500" :
+                            "bg-red-400 dark:bg-red-500"
+                          }`} style={{ height: `${(dataSource / maxCount) * 100}%` }} />
                         </div>
                         <span className="text-xs">{t(`memory.difficulty${d}`)}</span>
                       </div>
                     );
                   })}
                 </div>
+                <p className="text-[11px] text-muted-foreground mt-2 text-center">
+                  {stats.effective_difficulties ? "基于实际掌握程度" : "基于预设难度"}
+                </p>
               </CardContent>
             </Card>
             {stats.weak_domains && stats.weak_domains.length > 0 && (

@@ -61,14 +61,115 @@ def _zh_ratio(text: str) -> float:
     return zh_chars / len(compact)
 
 
+def _estimate_difficulty(source_text: str, target_text: str) -> int:
+    """Heuristic difficulty estimation (1-5) based on content features.
+
+    Factors:
+      - Text length (longer = harder)
+      - Word/character count
+      - Structural complexity (punctuation, clauses)
+      - Cognitive load signals (abstract terms, multi-meaning words, numbers)
+      - Cross-language mapping complexity
+    """
+    src = source_text.strip()
+    tgt = target_text.strip()
+    if not src or not tgt:
+        return 3
+
+    score = 0.0
+
+    # Length factor (0-2)
+    max_len = max(len(src), len(tgt))
+    if max_len <= 15:
+        score += 0.5
+    elif max_len <= 30:
+        score += 1.0
+    elif max_len <= 60:
+        score += 1.5
+    elif max_len <= 120:
+        score += 2.0
+    else:
+        score += 2.5
+
+    # Word count factor for English (0-1.5)
+    en_text = src if _zh_ratio(src) < 0.3 else tgt
+    if _zh_ratio(en_text) < 0.3:
+        words = re.findall(r"[a-zA-Z]+", en_text)
+        word_count = len(words)
+        if word_count <= 2:
+            score += 0.3
+        elif word_count <= 5:
+            score += 0.6
+        elif word_count <= 10:
+            score += 1.0
+        elif word_count <= 20:
+            score += 1.3
+        else:
+            score += 1.5
+    else:
+        # Chinese character count
+        zh_chars = sum(1 for c in en_text if "\u4e00" <= c <= "\u9fff")
+        if zh_chars <= 4:
+            score += 0.3
+        elif zh_chars <= 8:
+            score += 0.6
+        elif zh_chars <= 15:
+            score += 1.0
+        else:
+            score += 1.5
+
+    # Structural complexity (0-1)
+    clauses = 0
+    for sep in [",", "，", ";", "；", "、", "(", "（", "-", "—"]:
+        clauses += src.count(sep) + tgt.count(sep)
+    if clauses <= 1:
+        score += 0.2
+    elif clauses <= 3:
+        score += 0.5
+    elif clauses <= 5:
+        score += 0.8
+    else:
+        score += 1.0
+
+    # Cognitive load signals (0-1)
+    cognitive = 0.0
+    # Numbers/formulas increase difficulty
+    if re.search(r"\d+", src + tgt):
+        cognitive += 0.2
+    # Abstract indicator words (common in academic/translation contexts)
+    abstract_patterns = r"(concept|principle|theory|mechanism|process|approach|strategy|framework|paradigm|metaphor|allegory|irony|nuance|connotation|denotation|collocation|idiom|phrasal verb)"
+    if re.search(abstract_patterns, src + tgt, re.IGNORECASE):
+        cognitive += 0.3
+    # Multi-clause sentences (subordinating conjunctions)
+    subordinating = r"(although|because|while|whereas|unless|provided|given|considering|insofar|notwithstanding)"
+    if re.search(subordinating, src + tgt, re.IGNORECASE):
+        cognitive += 0.2
+    # Passive voice
+    if re.search(r"\b(been|being)\b.*\b(ed|en)\b", src + tgt, re.IGNORECASE):
+        cognitive += 0.1
+    # Chinese abstract indicators
+    zh_abstract = r"(概念|原理|机制|过程|方法|策略|框架|隐喻|讽刺|细微差别|内涵|外延|搭配|成语|惯用)"
+    if re.search(zh_abstract, src + tgt):
+        cognitive += 0.3
+    score += min(cognitive, 1.0)
+
+    # Map score (0.5-5.5) to difficulty (1-5)
+    difficulty = max(1, min(5, round(score)))
+    return difficulty
+
+
 def _normalize_card(pair: dict, domain: str = "通用", sort_order: int = 0) -> dict:
+    source_text = _cell_text(pair.get("source_text"))
+    target_text = _cell_text(pair.get("target_text"))
+    explicit_difficulty = pair.get("difficulty")
+    difficulty = int(explicit_difficulty) if explicit_difficulty is not None else _estimate_difficulty(source_text, target_text)
     return {
-        "source_text": _cell_text(pair.get("source_text")),
-        "target_text": _cell_text(pair.get("target_text")),
+        "source_text": source_text,
+        "target_text": target_text,
         "source_lang": pair.get("source_lang") or "en",
         "target_lang": pair.get("target_lang") or "zh",
         "domain": pair.get("domain") or domain,
-        "difficulty": int(pair.get("difficulty") or 3),
+        "difficulty": difficulty,
         "card_type": pair.get("card_type") or "bilingual",
         "sort_order": int(pair.get("sort_order") if pair.get("sort_order") is not None else sort_order),
         "extra_data": pair.get("extra_data"),
@@ -105,7 +206,7 @@ def parse_plain_text_cards(text: str, domain: str = "general") -> list[dict]:
             "source_lang": "zh" if _zh_ratio(source_text) > 0.3 else "en",
             "target_lang": "zh" if _zh_ratio(target_text) > 0.3 else "en",
             "domain": domain,
-            "difficulty": 3,
+            "difficulty": _estimate_difficulty(source_text, target_text),
             "card_type": "term" if max(len(left), len(right)) < 30 else "sentence",
             "sort_order": index,
         }
