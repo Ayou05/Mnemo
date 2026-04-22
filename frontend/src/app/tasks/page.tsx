@@ -33,6 +33,7 @@ import { TaskCard, CheckinCalendar, WeekView, MonthNav, shiftMonth } from "./com
 type TabKey = "tasks" | "plan" | "records";
 
 const STATUS_CHIPS = [
+  { key: "active", labelKey: "tasks.active" },
   { key: "all", labelKey: "tasks.all" },
   { key: "today", labelKey: "tasks.today" },
   { key: "overdue", labelKey: "tasks.overdue" },
@@ -111,7 +112,7 @@ export default function TasksPage() {
 
   // Filters
   const [search, setSearch] = useState("");
-  const [filterStatus, setFilterStatus] = useState("all");
+  const [filterStatus, setFilterStatus] = useState("active");
 
   // Dialog
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -266,6 +267,7 @@ export default function TasksPage() {
     if (filterStatus === "today") result = result.filter((t) => isToday(t.due_date) && t.status !== "completed");
     else if (filterStatus === "week") result = result.filter((t) => isThisWeek(t.due_date) && t.status !== "completed");
     else if (filterStatus === "overdue") result = result.filter((t) => isOverdue(t.due_date) && t.status !== "completed");
+    else if (filterStatus === "active") result = result.filter((t) => t.status !== "completed");
     else if (filterStatus !== "all") result = result.filter((t) => t.status === filterStatus);
 
     result.sort((a, b) => {
@@ -581,7 +583,7 @@ export default function TasksPage() {
 
       {/* Create/Edit Dialog */}
       <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
-        <DialogContent className="max-w-lg max-h-[85vh] overflow-y-auto">
+        <DialogContent className="max-w-lg">
           <DialogHeader>
             <DialogTitle>{editingTask ? t("tasks.editTask") : t("tasks.newTask")}</DialogTitle>
           </DialogHeader>

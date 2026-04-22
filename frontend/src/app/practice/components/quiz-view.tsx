@@ -410,7 +410,7 @@ export function QuizView({ quiz, setQuiz, onBack, onComplete }: Props) {
                 <Sparkles className="h-4 w-4 text-primary" />
                 AI 辅导 — 这道题
               </div>
-              <div ref={tutorScrollRef} className="max-h-60 overflow-y-auto p-3 space-y-2">
+              <div ref={tutorScrollRef} className="max-h-60 md:max-h-80 overflow-y-auto p-3 space-y-2 pb-24 md:pb-0">
                 {currentTutorChat.length === 0 && (
                   <p className="text-xs text-muted-foreground text-center py-2">
                     对这道题有疑问？直接问 AI，比如"为什么我选的不对？""这个知识点还能怎么考？"

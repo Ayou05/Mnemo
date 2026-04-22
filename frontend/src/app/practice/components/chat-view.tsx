@@ -46,24 +46,21 @@ export function ChatView({ messages, setMessages, onStartQuiz }: Props) {
     setMessages((prev) => [...prev, userMsg, loadingMsg]);
 
     try {
-      // Check if we should use the tutor endpoint (user is discussing quiz results)
       const quizCtx = getRecentQuizContext();
       const useTutor = quizCtx && quizCtx.wrongQuestions.length > 0;
 
       let res: any;
       if (useTutor) {
-        // Use tutor endpoint with quiz context for richer discussion
         res = await api.post("/practice/tutor", {
           message: msg,
           history: messages
             .filter((m) => !m.loading && !m.practiceSet && !m.quizResult)
-            .slice(-10) // last 10 real messages for context
+            .slice(-10)
             .map((m) => ({ role: m.role, content: m.content })),
           wrong_questions: quizCtx.wrongQuestions,
           quiz_title: quizCtx.title,
         });
       } else {
-        // Use generate endpoint for new question requests
         res = await api.post("/practice/generate", {
           prompt: msg,
           goal: practiceGoal || undefined,
@@ -71,7 +68,6 @@ export function ChatView({ messages, setMessages, onStartQuiz }: Props) {
       }
 
       if (useTutor) {
-        // Tutor response
         const assistantMsg: ChatMessage = {
           id: (Date.now() + 2).toString(),
           role: "assistant",
@@ -79,7 +75,6 @@ export function ChatView({ messages, setMessages, onStartQuiz }: Props) {
         };
         setMessages((prev) => prev.filter((m) => !m.loading).concat(assistantMsg));
       } else if (res?.set_id) {
-        // Generated a practice set
         const practiceSet: PracticeSetData = {
           set_id: res.set_id,
           title: res.title || msg.slice(0, 30),
@@ -117,10 +112,10 @@ export function ChatView({ messages, setMessages, onStartQuiz }: Props) {
   const prompts = GOAL_PROMPTS[goalKey] || GOAL_PROMPTS.default;
 
   return (
-    <div className="space-y-4">
+    <div className="flex flex-col h-[calc(100vh-12rem)] md:h-auto gap-4">
       {/* Quick prompts */}
       {messages.length === 0 && (
-        <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+        <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 shrink-0">
           {prompts.map((p, i) => (
             <button key={i} onClick={() => sendMessage(p.prompt)}
               className="flex items-center gap-2 p-3 rounded-xl border border-border/50 bg-card hover:bg-muted/50 transition-colors text-left">
@@ -131,8 +126,11 @@ export function ChatView({ messages, setMessages, onStartQuiz }: Props) {
         </div>
       )}
 
-      {/* Messages */}
-      <div ref={scrollRef} className="space-y-3 max-h-[60vh] overflow-y-auto">
+      {/* Messages — scroll area, respects mobile bottom nav (pb-24) and input area */}
+      <div
+        ref={scrollRef}
+        className="flex-1 min-h-0 overflow-y-auto pb-24 md:pb-0 space-y-3"
+      >
         {messages.map((msg) => (
           <div key={msg.id} className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}>
             <div className={`max-w-[80%] rounded-2xl px-4 py-2.5 text-sm leading-relaxed ${
@@ -146,7 +144,6 @@ export function ChatView({ messages, setMessages, onStartQuiz }: Props) {
                   <span>思考中...</span>
                 </div>
               ) : msg.quizResult ? (
-                /* ── Quiz Result Message ── */
                 <div className="space-y-2">
                   <p className="font-medium">{msg.content}</p>
                   <div className="grid grid-cols-2 gap-2 text-xs">
@@ -198,8 +195,8 @@ export function ChatView({ messages, setMessages, onStartQuiz }: Props) {
         ))}
       </div>
 
-      {/* Input */}
-      <div className="flex gap-2">
+      {/* Input — fixed at bottom with padding for mobile nav */}
+      <div className="flex gap-2 shrink-0 pb-24 md:pb-0">
         <Input value={input} onChange={(e) => setInput(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && !e.shiftKey && sendMessage()}
           placeholder="描述你想练习的内容，或向 AI 请教任何问题..." className="rounded-xl" disabled={sending} />

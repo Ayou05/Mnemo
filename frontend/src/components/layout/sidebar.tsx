@@ -34,6 +34,7 @@ export function Sidebar() {
     { href: "/dashboard", label: t("nav.dashboard"), icon: LayoutDashboard },
     { href: "/tasks", label: t("nav.tasks"), icon: CheckSquare },
     { href: "/memory", label: t("nav.memory"), icon: Brain },
+    { href: "/practice", label: "练习", icon: BookOpen },
     { href: "/courses", label: t("nav.courses"), icon: Headphones },
     { href: "/schedule", label: t("nav.schedule"), icon: CalendarDays },
     { href: "/settings", label: t("nav.settings"), icon: Settings },
