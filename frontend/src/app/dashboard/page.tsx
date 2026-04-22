@@ -75,6 +75,24 @@ interface WeeklyReport {
   has_activity: boolean;
 }
 
+interface DailyPlanTask {
+  id: string;
+  type: string;
+  label: string;
+  icon: string;
+  description: string;
+  ai_generated: boolean;
+  completed: boolean;
+  route: string;
+}
+
+interface DailyPlan {
+  id: string;
+  plan_date: string;
+  tasks: DailyPlanTask[];
+  ai_note: string | null;
+}
+
 export default function DashboardPage() {
   const { t } = useTranslation();
   const router = useRouter();
@@ -83,6 +101,7 @@ export default function DashboardPage() {
   const [memoryStats, setMemoryStats] = useState<MemoryStats | null>(null);
   const [weeklyReport, setWeeklyReport] = useState<WeeklyReport | null>(null);
   const [reportLoading, setReportLoading] = useState(false);
+  const [dailyPlan, setDailyPlan] = useState<DailyPlan | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -124,10 +143,35 @@ export default function DashboardPage() {
     finally { setReportLoading(false); }
   }, []);
 
+  // Fetch daily plan
+  const fetchDailyPlan = useCallback(async () => {
+    try {
+      const res = await api.get("/ai/daily-plan") as any;
+      if (res) setDailyPlan(res);
+    } catch { /* silent */ }
+  }, []);
+
   useEffect(() => {
     fetchWeeklyReport();
   }, [fetchWeeklyReport]);
 
+  useEffect(() => {
+    fetchDailyPlan();
+  }, [fetchDailyPlan]);
+
+  // Toggle daily plan task
+  const toggleDailyPlanTask = useCallback(async (taskId: string, completed: boolean) => {
+    try {
+      await api.patch(`/ai/daily-plan/tasks/${taskId}`, { completed });
+      setDailyPlan((prev) => {
+        if (!prev) return prev;
+        return {
+          ...prev,
+          tasks: prev.tasks.map((t) => t.id === taskId ? { ...t, completed } : t),
+        };
+      });
+    } catch { /* silent */ }
+  }, []);
   if (loading) return <AppLayout><DashboardSkeleton /></AppLayout>;
   if (error) return <AppLayout><ErrorState message={error} onRetry={fetchData} /></AppLayout>;
 
@@ -278,6 +322,61 @@ export default function DashboardPage() {
             </CardContent>
           </Card>
         ) : null}
+
+        {/* Today's Learning Plan */}
+        {dailyPlan && dailyPlan.tasks.length > 0 && (
+          <Card className="card-hover overflow-hidden border-primary/20">
+            <CardHeader className="pb-2 flex flex-row items-center justify-between">
+              <CardTitle className="flex items-center gap-2 text-base font-semibold">
+                <Target className="h-4 w-4 text-primary" />
+                今日学习计划
+              </CardTitle>
+              <span className="text-xs text-muted-foreground">{dailyPlan.plan_date}</span>
+            </CardHeader>
+            <CardContent className="space-y-2">
+              {dailyPlan.ai_note && (
+                <p className="text-xs text-muted-foreground bg-muted/50 rounded-lg px-3 py-2 mb-2">
+                  {dailyPlan.ai_note}
+                </p>
+              )}
+              {dailyPlan.tasks.map((task) => (
+                <div key={task.id}
+                  className={`flex items-center gap-3 px-3 py-2.5 rounded-xl transition-colors ${
+                    task.completed
+                      ? "bg-emerald-500/5 opacity-60"
+                      : "bg-card hover:bg-muted/50"
+                  }`}>
+                  <button
+                    onClick={() => toggleDailyPlanTask(task.id, !task.completed)}
+                    className={`h-5 w-5 rounded-full border-2 flex items-center justify-center flex-shrink-0 transition-all ${
+                      task.completed
+                        ? "bg-emerald-500 border-emerald-500 text-white"
+                        : "border-muted-foreground/30 hover:border-primary"
+                    }`}>
+                    {task.completed && <CheckCircle2 className="h-3 w-3" />}
+                  </button>
+                  <span className="text-lg">{task.icon}</span>
+                  <div className="flex-1 min-w-0">
+                    <p className={`text-sm font-medium ${task.completed ? "line-through text-muted-foreground" : ""}`}>
+                      {task.label}
+                    </p>
+                    {task.description && (
+                      <p className="text-xs text-muted-foreground truncate">{task.description}</p>
+                    )}
+                  </div>
+                  <Button
+                    size="sm"
+                    variant={task.completed ? "ghost" : "outline"}
+                    className="h-7 text-[11px] shrink-0 rounded-lg"
+                    onClick={() => router.push(task.route)}
+                  >
+                    {task.completed ? "已完成" : "去练习"}
+                  </Button>
+                </div>
+              ))}
+            </CardContent>
+          </Card>
+        )}
 
         {/* Main Content */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
