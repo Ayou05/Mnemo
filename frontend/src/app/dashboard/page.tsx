@@ -61,12 +61,28 @@ interface MemoryStats {
   difficulties: Record<string, number>;
 }
 
+interface WeeklyReport {
+  start_date: string;
+  end_date: string;
+  report: string;
+  progress: {
+    memory_mastery: string;
+    practice_accuracy: string;
+    tasks_completed: string;
+  };
+  weak_topics: string[];
+  next_week_suggestions: string[];
+  has_activity: boolean;
+}
+
 export default function DashboardPage() {
   const { t } = useTranslation();
   const router = useRouter();
   const [tasks, setTasks] = useState<Task[]>([]);
   const [stats, setStats] = useState<TaskStats | null>(null);
   const [memoryStats, setMemoryStats] = useState<MemoryStats | null>(null);
+  const [weeklyReport, setWeeklyReport] = useState<WeeklyReport | null>(null);
+  const [reportLoading, setReportLoading] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -97,6 +113,20 @@ export default function DashboardPage() {
   useEffect(() => {
     fetchData().finally(() => setLoading(false));
   }, [fetchData]);
+
+  // Fetch weekly report
+  const fetchWeeklyReport = useCallback(async () => {
+    setReportLoading(true);
+    try {
+      const res = await api.post("/ai/weekly-report") as any;
+      if (res) setWeeklyReport(res);
+    } catch { /* silent */ }
+    finally { setReportLoading(false); }
+  }, []);
+
+  useEffect(() => {
+    fetchWeeklyReport();
+  }, [fetchWeeklyReport]);
 
   if (loading) return <AppLayout><DashboardSkeleton /></AppLayout>;
   if (error) return <AppLayout><ErrorState message={error} onRetry={fetchData} /></AppLayout>;
@@ -177,6 +207,77 @@ export default function DashboardPage() {
             gradient="from-red-500/10 to-rose-500/5"
           />
         </div>
+
+        {/* Weekly Report Card */}
+        {reportLoading ? (
+          <Card className="card-hover overflow-hidden border-primary/20">
+            <CardContent className="p-5">
+              <div className="flex items-center gap-3">
+                <div className="p-2 rounded-xl bg-primary/10">
+                  <Sparkles className="h-5 w-5 text-primary animate-pulse" />
+                </div>
+                <div className="flex-1">
+                  <p className="text-sm font-medium">正在生成学习周报...</p>
+                  <p className="text-xs text-muted-foreground">AI 私教正在分析你的学习数据</p>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+        ) : weeklyReport?.has_activity ? (
+          <Card className="card-hover overflow-hidden border-primary/20">
+            <CardHeader className="pb-2 flex flex-row items-center justify-between">
+              <CardTitle className="flex items-center gap-2 text-base font-semibold">
+                <Sparkles className="h-4 w-4 text-primary" />
+                AI 私教周报
+              </CardTitle>
+              <span className="text-xs text-muted-foreground">{weeklyReport.start_date} ~ {weeklyReport.end_date}</span>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              {/* Progress row */}
+              <div className="grid grid-cols-3 gap-3">
+                <div className="rounded-xl bg-muted/50 p-3 text-center">
+                  <div className="text-lg font-bold text-primary">{weeklyReport.progress?.memory_mastery || '—'}</div>
+                  <div className="text-[10px] text-muted-foreground">记忆正确率</div>
+                </div>
+                <div className="rounded-xl bg-muted/50 p-3 text-center">
+                  <div className="text-lg font-bold text-blue-500">{weeklyReport.progress?.practice_accuracy || '—'}</div>
+                  <div className="text-[10px] text-muted-foreground">练习正确率</div>
+                </div>
+                <div className="rounded-xl bg-muted/50 p-3 text-center">
+                  <div className="text-lg font-bold text-emerald-500">{weeklyReport.progress?.tasks_completed || '0'}</div>
+                  <div className="text-[10px] text-muted-foreground">完成任务</div>
+                </div>
+              </div>
+              {/* Report text */}
+              <p className="text-sm text-muted-foreground leading-relaxed whitespace-pre-line">
+                {weeklyReport.report}
+              </p>
+              {/* Weak topics */}
+              {weeklyReport.weak_topics && weeklyReport.weak_topics.length > 0 && (
+                <div className="flex flex-wrap gap-1.5">
+                  <span className="text-xs text-muted-foreground">薄弱：</span>
+                  {weeklyReport.weak_topics.slice(0, 4).map((topic) => (
+                    <Badge key={topic} variant="outline" className="text-[11px]">
+                      {topic}
+                    </Badge>
+                  ))}
+                </div>
+              )}
+              {/* Suggestions */}
+              {weeklyReport.next_week_suggestions && weeklyReport.next_week_suggestions.length > 0 && (
+                <div className="space-y-1">
+                  <p className="text-xs font-medium text-muted-foreground">下周建议</p>
+                  {weeklyReport.next_week_suggestions.map((s, i) => (
+                    <div key={i} className="flex items-start gap-2 text-xs">
+                      <ArrowRight className="h-3 w-3 mt-0.5 text-primary shrink-0" />
+                      <span className="text-muted-foreground">{s}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        ) : null}
 
         {/* Main Content */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
