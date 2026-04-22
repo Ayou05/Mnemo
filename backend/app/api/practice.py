@@ -590,7 +590,7 @@ async def get_wrong_questions(
     questions_result = await db.execute(
         select(PracticeQuestion)
         .where(PracticeQuestion.id.in_(wrong_ids))
-        .order_by(desc(PracticeQuestion.updated_at))
+        .order_by(desc(PracticeQuestion.created_at))
     )
     questions = questions_result.scalars().all()
     items = []
